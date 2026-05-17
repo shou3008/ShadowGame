@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>シルエット投影</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <canvas id="canvas"></canvas>
+    <div id="ui">
+      <div id="ui-bar">
+        <div id="status">初期化中...</div>
+        <div id="ui-right">
+          <span id="fps">-- fps</span>
+          <button id="settings-toggle" title="設定">⚙</button>
+        </div>
+      </div>
+      <div id="settings-panel" hidden>
+        <div class="controls">
+          <label>
+            <span>シルエット色</span>
+            <input type="color" id="ctrl-fg" value="#000000">
+          </label>
+          <label>
+            <span>背景色</span>
+            <input type="color" id="ctrl-bg" value="#ffffff">
+          </label>
+        </div>
+      </div>
+    </div>
+    <script>
+      document.getElementById('settings-toggle').addEventListener('click', () => {
+        const panel = document.getElementById('settings-panel');
+        const btn   = document.getElementById('settings-toggle');
+        panel.hidden = !panel.hidden;
+        btn.classList.toggle('active', !panel.hidden);
+      });
+    </script>
+  </div>
+  <video id="video" autoplay playsinline></video>
+
+  <!-- MediaPipe Selfie Segmentation — TFLite BodyPix の Web 公式実装 -->
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
