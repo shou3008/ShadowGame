@@ -31,6 +31,12 @@
         <div class="tool-group">
           <label for="ctrl-fg">影</label>
           <input type="color" id="ctrl-fg" value="#000000">
+          <label for="ctrl-hand">手先</label>
+          <input type="color" id="ctrl-hand" value="#ff0000">
+          <label for="ctrl-head">頭</label>
+          <input type="color" id="ctrl-head" value="#3399ff">
+          <label for="ctrl-leg">膝下</label>
+          <input type="color" id="ctrl-leg" value="#22cc44">
           <label for="ctrl-bg">背景</label>
           <input type="color" id="ctrl-bg" value="#ffffff">
         </div>
@@ -57,8 +63,6 @@
   </div>
   <video id="video" autoplay playsinline></video>
 
-  <script src="node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
-  <script src="node_modules/@tensorflow-models/body-pix/dist/body-pix.min.umd.js"></script>
   <script type="module" src="src/app.js"></script>
 </body>
 </html>
