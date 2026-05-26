@@ -1,16 +1,21 @@
-// Vertex shader — u_flip=1 のとき上下左右反転（最終出力パスのみに適用）
+// Vertex shader — u_flipX/u_flipY で水平・垂直反転を独立制御（最終出力パスのみに適用）
+// 垂直反転は FBO 多段描画による上下反転を補正するため最終パスで常に有効。
+// 水平反転は UI の「左右反転」トグルから切り替える。
 const VERT = `#version 300 es
 layout(location=0) in vec2 a_pos;
 layout(location=1) in vec2 a_uv;
-uniform int u_flip;
+uniform int u_flipX;
+uniform int u_flipY;
 out vec2 v_uv;
 void main() {
   gl_Position = vec4(a_pos, 0.0, 1.0);
-  v_uv = u_flip != 0 ? vec2(1.0 - a_uv.x, 1.0 - a_uv.y) : a_uv;
+  float u = u_flipX != 0 ? 1.0 - a_uv.x : a_uv.x;
+  float v = u_flipY != 0 ? 1.0 - a_uv.y : a_uv.y;
+  v_uv = vec2(u, v);
 }`;
 
-// Pass 1: 水平収縮 — RGBA mask (alpha=信頼度) → R8 FBO
-const H_ERODE_FRAG = `#version 300 es
+// Pass 1: 水平膨張 — RGBA alpha → R8 FBO（閾値処理 + 膨張）
+const H_DILATE_RGBA_FRAG = `#version 300 es
 precision mediump float;
 uniform sampler2D u_tex;
 uniform float u_step;
@@ -19,60 +24,22 @@ uniform float u_thresh;
 in vec2 v_uv;
 out vec4 fragColor;
 void main() {
-  float m = 1.0;
-  for (int i = -30; i <= 30; i++) {
-    if (abs(i) > u_r) continue;
-    float a = texture(u_tex, v_uv + vec2(float(i) * u_step, 0.0)).a;
-    m = min(m, step(u_thresh, a));
-    if (m < 0.01) break;
-  }
-  fragColor = vec4(m, 0.0, 0.0, 1.0);
-}`;
-
-// Pass 2: 垂直収縮 — R8 FBO → R8 FBO
-const V_ERODE_FRAG = `#version 300 es
-precision mediump float;
-uniform sampler2D u_tex;
-uniform float u_step;
-uniform int   u_r;
-in vec2 v_uv;
-out vec4 fragColor;
-void main() {
-  float m = 1.0;
-  for (int i = -30; i <= 30; i++) {
-    if (abs(i) > u_r) continue;
-    m = min(m, texture(u_tex, v_uv + vec2(0.0, float(i) * u_step)).r);
-    if (m < 0.01) break;
-  }
-  fragColor = vec4(m, 0.0, 0.0, 1.0);
-}`;
-
-// Pass 3: 水平膨張 — R8 FBO → R8 FBO
-const H_DILATE_FRAG = `#version 300 es
-precision mediump float;
-uniform sampler2D u_tex;
-uniform float u_step;
-uniform int   u_r;
-in vec2 v_uv;
-out vec4 fragColor;
-void main() {
   float m = 0.0;
   for (int i = -30; i <= 30; i++) {
     if (abs(i) > u_r) continue;
-    m = max(m, texture(u_tex, v_uv + vec2(float(i) * u_step, 0.0)).r);
+    float a = texture(u_tex, v_uv + vec2(float(i) * u_step, 0.0)).a;
+    m = max(m, step(u_thresh, a));
     if (m > 0.99) break;
   }
   fragColor = vec4(m, 0.0, 0.0, 1.0);
 }`;
 
-// Pass 4: 垂直膨張 + 色付け + 反転 — R8 FBO → screen
+// Pass 2: 垂直膨張 — R8 FBO → R8 FBO
 const V_DILATE_FRAG = `#version 300 es
 precision mediump float;
 uniform sampler2D u_tex;
 uniform float u_step;
 uniform int   u_r;
-uniform vec4  u_fg;
-uniform vec4  u_bg;
 in vec2 v_uv;
 out vec4 fragColor;
 void main() {
@@ -82,17 +49,57 @@ void main() {
     m = max(m, texture(u_tex, v_uv + vec2(0.0, float(i) * u_step)).r);
     if (m > 0.99) break;
   }
+  fragColor = vec4(m, 0.0, 0.0, 1.0);
+}`;
+
+// Pass 3: 水平収縮 — R8 FBO → R8 FBO
+const H_ERODE_FRAG = `#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+uniform float u_step;
+uniform int   u_r;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  float m = 1.0;
+  for (int i = -30; i <= 30; i++) {
+    if (abs(i) > u_r) continue;
+    m = min(m, texture(u_tex, v_uv + vec2(float(i) * u_step, 0.0)).r);
+    if (m < 0.01) break;
+  }
+  fragColor = vec4(m, 0.0, 0.0, 1.0);
+}`;
+
+// Pass 4: 垂直収縮 + 色付け + 反転 — R8 FBO → screen
+const V_ERODE_COLOR_FRAG = `#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+uniform float u_step;
+uniform int   u_r;
+uniform vec4  u_fg;
+uniform vec4  u_bg;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  float m = 1.0;
+  for (int i = -30; i <= 30; i++) {
+    if (abs(i) > u_r) continue;
+    m = min(m, texture(u_tex, v_uv + vec2(0.0, float(i) * u_step)).r);
+    if (m < 0.01) break;
+  }
   fragColor = (m > 0.5) ? u_fg : u_bg;
 }`;
 
 export class Renderer {
   #gl;
-  #hErodeProg; #vErodeProg;
-  #hDilateProg; #vDilateProg;
+  #hDilateRgbaProg;
+  #vDilateProg;
+  #hErodeR8Prog;
+  #vErodeColorProg;
   #vao;
   #maskTex;
-  #fboA; #fbTexA;   // H収縮結果 → H膨張結果
-  #fboB; #fbTexB;   // V収縮結果
+  #fboA; #fbTexA;
+  #fboB; #fbTexB;
   #w = 0; #h = 0;
 
   constructor(canvas) {
@@ -100,10 +107,10 @@ export class Renderer {
     if (!gl) throw new Error('WebGL2 がサポートされていません');
     this.#gl = gl;
 
-    this.#hErodeProg  = this.#buildProgram(VERT, H_ERODE_FRAG);
-    this.#vErodeProg  = this.#buildProgram(VERT, V_ERODE_FRAG);
-    this.#hDilateProg = this.#buildProgram(VERT, H_DILATE_FRAG);
-    this.#vDilateProg = this.#buildProgram(VERT, V_DILATE_FRAG);
+    this.#hDilateRgbaProg = this.#buildProgram(VERT, H_DILATE_RGBA_FRAG);
+    this.#vDilateProg     = this.#buildProgram(VERT, V_DILATE_FRAG);
+    this.#hErodeR8Prog    = this.#buildProgram(VERT, H_ERODE_FRAG);
+    this.#vErodeColorProg = this.#buildProgram(VERT, V_ERODE_COLOR_FRAG);
 
     this.#vao     = this.#buildQuad();
     this.#maskTex = this.#makeTex(gl.NEAREST);
@@ -137,9 +144,9 @@ export class Renderer {
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
   }
 
-  // パイプライン: 収縮(H→V) → 膨張(H→V) = 開演算でノイズ除去
-  // erodeRadius < dilateRadius にすることで指など細い部分を保護
-  render(maskImage, { erodeRadius, dilateRadius, threshold, fgColor, bgColor }) {
+  // パイプライン: 膨張(H→V) → 収縮(H→V) = クロージング
+  // 同じ半径で膨張→収縮することで、人物間の隙間（腕幅程度）を埋めつつ輪郭を保つ
+  render(maskImage, { closeRadius, threshold, fgColor, bgColor, mirror = true }) {
     const gl = this.#gl;
     const W = this.#w, H = this.#h;
 
@@ -147,49 +154,53 @@ export class Renderer {
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, maskImage);
     gl.bindVertexArray(this.#vao);
 
-    // Pass 1: 水平収縮 (mask → fboA)
+    // Pass 1: 水平膨張 (RGBA mask → fboA)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.#fboA);
     gl.viewport(0, 0, W, H);
-    gl.useProgram(this.#hErodeProg);
+    gl.useProgram(this.#hDilateRgbaProg);
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.#maskTex);
-    this.#setUniforms(this.#hErodeProg, { flip: 0, step: 1/W, r: erodeRadius, thresh: threshold });
+    this.#setUniforms(this.#hDilateRgbaProg, { step: 1/W, r: closeRadius, thresh: threshold });
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // Pass 2: 垂直収縮 (fboA → fboB)
+    // Pass 2: 垂直膨張 (fboA → fboB)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.#fboB);
-    gl.viewport(0, 0, W, H);
-    gl.useProgram(this.#vErodeProg);
-    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexA);
-    this.#setUniforms(this.#vErodeProg, { flip: 0, step: 1/H, r: erodeRadius });
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // Pass 3: 水平膨張 (fboB → fboA)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#fboA);
-    gl.viewport(0, 0, W, H);
-    gl.useProgram(this.#hDilateProg);
-    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexB);
-    this.#setUniforms(this.#hDilateProg, { flip: 0, step: 1/W, r: dilateRadius });
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-
-    // Pass 4: 垂直膨張 + 色付け + 反転 (fboA → screen)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
     gl.useProgram(this.#vDilateProg);
     gl.bindTexture(gl.TEXTURE_2D, this.#fbTexA);
-    this.#setUniforms(this.#vDilateProg, { flip: 1, step: 1/H, r: dilateRadius, fg: fgColor, bg: bgColor });
+    this.#setUniforms(this.#vDilateProg, { step: 1/H, r: closeRadius });
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Pass 3: 水平収縮 (fboB → fboA)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#fboA);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(this.#hErodeR8Prog);
+    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexB);
+    this.#setUniforms(this.#hErodeR8Prog, { step: 1/W, r: closeRadius });
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Pass 4: 垂直収縮 + 色付け + 反転 (fboA → screen)
+    // flipY は表示の上下補正で常時有効、flipX が UI の左右反転
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(this.#vErodeColorProg);
+    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexA);
+    this.#setUniforms(this.#vErodeColorProg, {
+      flipX: mirror ? 1 : 0, flipY: 1, step: 1/H, r: closeRadius, fg: fgColor, bg: bgColor,
+    });
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  #setUniforms(prog, { flip = 0, step, r, thresh, fg, bg } = {}) {
+  #setUniforms(prog, { flipX = 0, flipY = 0, step, r, thresh, fg, bg } = {}) {
     const gl = this.#gl;
     const loc = name => gl.getUniformLocation(prog, name);
-    gl.uniform1i(loc('u_flip'), flip);
-    if (step  !== undefined) gl.uniform1f(loc('u_step'),   step);
-    if (r     !== undefined) gl.uniform1i(loc('u_r'),      r);
+    gl.uniform1i(loc('u_flipX'), flipX);
+    gl.uniform1i(loc('u_flipY'), flipY);
+    if (step   !== undefined) gl.uniform1f(loc('u_step'),   step);
+    if (r      !== undefined) gl.uniform1i(loc('u_r'),      r);
     if (thresh !== undefined) gl.uniform1f(loc('u_thresh'), thresh);
-    if (fg)    gl.uniform4fv(loc('u_fg'), fg);
-    if (bg)    gl.uniform4fv(loc('u_bg'), bg);
+    if (fg)                   gl.uniform4fv(loc('u_fg'),    fg);
+    if (bg)                   gl.uniform4fv(loc('u_bg'),    bg);
   }
 
   #buildQuad() {

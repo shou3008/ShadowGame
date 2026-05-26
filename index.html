@@ -10,38 +10,50 @@
   <div id="app">
     <canvas id="canvas"></canvas>
     <div id="ui">
-      <div id="ui-bar">
-        <div id="status">初期化中...</div>
-        <div id="ui-right">
+      <div id="toolbar">
+        <div class="tool-group">
+          <label for="ctrl-camera">カメラ</label>
+          <select id="ctrl-camera"><option>読み込み中...</option></select>
+        </div>
+        <div class="tool-group">
+          <label class="check"><input type="checkbox" id="ctrl-flip" checked>左右反転</label>
+        </div>
+        <div class="tool-group">
+          <label for="ctrl-scale">解像度</label>
+          <input type="range" id="ctrl-scale" min="10" max="100" step="5" value="100">
+          <span id="ctrl-scale-val">-- px</span>
+        </div>
+        <div class="tool-group">
+          <label for="ctrl-fg">影</label>
+          <input type="color" id="ctrl-fg" value="#000000">
+          <label for="ctrl-bg">背景</label>
+          <input type="color" id="ctrl-bg" value="#ffffff">
+        </div>
+        <div class="tool-group spacer">
+          <span id="status">初期化中...</span>
           <span id="fps">-- fps</span>
-          <button id="settings-toggle" title="設定">⚙</button>
+          <button id="ui-toggle" title="ツールバーを隠す">×</button>
         </div>
       </div>
-      <div id="settings-panel" hidden>
-        <div class="controls">
-          <label>
-            <span>シルエット色</span>
-            <input type="color" id="ctrl-fg" value="#000000">
-          </label>
-          <label>
-            <span>背景色</span>
-            <input type="color" id="ctrl-bg" value="#ffffff">
-          </label>
-        </div>
-      </div>
+      <button id="ui-show" title="設定を表示" hidden>⚙</button>
     </div>
     <script>
-      document.getElementById('settings-toggle').addEventListener('click', () => {
-        const panel = document.getElementById('settings-panel');
-        const btn   = document.getElementById('settings-toggle');
-        panel.hidden = !panel.hidden;
-        btn.classList.toggle('active', !panel.hidden);
-      });
+      (function () {
+        const toolbar = document.getElementById('toolbar');
+        const showBtn = document.getElementById('ui-show');
+        document.getElementById('ui-toggle').addEventListener('click', () => {
+          toolbar.hidden = true;  showBtn.hidden = false;
+        });
+        showBtn.addEventListener('click', () => {
+          toolbar.hidden = false; showBtn.hidden = true;
+        });
+      })();
     </script>
   </div>
   <video id="video" autoplay playsinline></video>
 
-  <!-- MediaPipe Selfie Segmentation — TFLite BodyPix の Web 公式実装 -->
+  <script src="node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
+  <script src="node_modules/@tensorflow-models/body-pix/dist/body-pix.min.umd.js"></script>
   <script type="module" src="src/app.js"></script>
 </body>
 </html>
