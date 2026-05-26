@@ -28,6 +28,8 @@ const ctrlScale  = document.getElementById('ctrl-scale');
 const ctrlScaleVal = document.getElementById('ctrl-scale-val');
 const ctrlFlip   = document.getElementById('ctrl-flip');
 const ctrlCamera = document.getElementById('ctrl-camera');
+const ctrlCell   = document.getElementById('ctrl-cell');
+const ctrlCellVal = document.getElementById('ctrl-cell-val');
 
 function hexToVec4(hex) {
   return new Float32Array([
@@ -42,7 +44,8 @@ const config = {
   fgColor:    hexToVec4('#000000'),
   bgColor:    hexToVec4('#ffffff'),
   pixelScale: 1.0,
-  mirror:     ctrlFlip.checked, // 左右反転
+  mirror:     ctrlFlip.checked,            // 左右反転
+  cellSize:   parseInt(ctrlCell.value),    // モザイクの間隔(px) = 四角サイズ
 };
 
 ctrlFg.addEventListener('input', () => { config.fgColor = hexToVec4(ctrlFg.value); });
@@ -50,6 +53,10 @@ ctrlBg.addEventListener('input', () => { config.bgColor = hexToVec4(ctrlBg.value
 ctrlFlip.addEventListener('change', () => { config.mirror = ctrlFlip.checked; });
 ctrlScale.addEventListener('input', () => {
   config.pixelScale = parseInt(ctrlScale.value) / 100;
+});
+ctrlCell.addEventListener('input', () => {
+  config.cellSize = parseInt(ctrlCell.value);
+  ctrlCellVal.textContent = ctrlCell.value + 'px';
 });
 
 // --- Main ---

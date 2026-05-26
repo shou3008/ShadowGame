@@ -70,14 +70,12 @@ void main() {
   fragColor = vec4(m, 0.0, 0.0, 1.0);
 }`;
 
-// Pass 4: 垂直収縮 + 色付け + 反転 — R8 FBO → screen
-const V_ERODE_COLOR_FRAG = `#version 300 es
+// Pass 4: 垂直収縮 — R8 FBO → R8 FBO（クロージング完成）
+const V_ERODE_FRAG = `#version 300 es
 precision mediump float;
 uniform sampler2D u_tex;
 uniform float u_step;
 uniform int   u_r;
-uniform vec4  u_fg;
-uniform vec4  u_bg;
 in vec2 v_uv;
 out vec4 fragColor;
 void main() {
@@ -87,7 +85,36 @@ void main() {
     m = min(m, texture(u_tex, v_uv + vec2(0.0, float(i) * u_step)).r);
     if (m < 0.01) break;
   }
-  fragColor = (m > 0.5) ? u_fg : u_bg;
+  fragColor = vec4(m, 0.0, 0.0, 1.0);
+}`;
+
+// Pass 5: グリッドモザイク化 + 色付け + 反転 — R8 FBO → screen
+// 出力をセル(u_cell px = 間隔)のグリッドに分割し、各セルに影があるか(二値)で
+// セル全体を塗りつぶす。四角(=セル)のサイズは間隔に連動して変わる。
+const MOSAIC_COLOR_FRAG = `#version 300 es
+precision mediump float;
+uniform sampler2D u_tex;
+uniform vec2  u_res;   // 出力解像度(px)
+uniform float u_cell;  // グリッドセル一辺(px) = 間隔 = 四角サイズ
+uniform vec4  u_fg;
+uniform vec4  u_bg;
+in vec2 v_uv;
+out vec4 fragColor;
+void main() {
+  vec2  px     = v_uv * u_res;
+  vec2  cell   = floor(px / u_cell);
+  vec2  center = (cell + 0.5) * u_cell;
+
+  // セル範囲に影があるかを 3x3 平均の被覆で二値判定
+  float cov = 0.0;
+  for (int yy = -1; yy <= 1; yy++) {
+    for (int xx = -1; xx <= 1; xx++) {
+      vec2 off = vec2(float(xx), float(yy)) * (u_cell / 3.0);
+      cov += texture(u_tex, (center + off) / u_res).r;
+    }
+  }
+  float on = step(0.5, cov / 9.0);
+  fragColor = mix(u_bg, u_fg, on);
 }`;
 
 export class Renderer {
@@ -95,7 +122,8 @@ export class Renderer {
   #hDilateRgbaProg;
   #vDilateProg;
   #hErodeR8Prog;
-  #vErodeColorProg;
+  #vErodeProg;
+  #mosaicProg;
   #vao;
   #maskTex;
   #fboA; #fbTexA;
@@ -110,7 +138,8 @@ export class Renderer {
     this.#hDilateRgbaProg = this.#buildProgram(VERT, H_DILATE_RGBA_FRAG);
     this.#vDilateProg     = this.#buildProgram(VERT, V_DILATE_FRAG);
     this.#hErodeR8Prog    = this.#buildProgram(VERT, H_ERODE_FRAG);
-    this.#vErodeColorProg = this.#buildProgram(VERT, V_ERODE_COLOR_FRAG);
+    this.#vErodeProg      = this.#buildProgram(VERT, V_ERODE_FRAG);
+    this.#mosaicProg      = this.#buildProgram(VERT, MOSAIC_COLOR_FRAG);
 
     this.#vao     = this.#buildQuad();
     this.#maskTex = this.#makeTex(gl.NEAREST);
@@ -146,7 +175,7 @@ export class Renderer {
 
   // パイプライン: 膨張(H→V) → 収縮(H→V) = クロージング
   // 同じ半径で膨張→収縮することで、人物間の隙間（腕幅程度）を埋めつつ輪郭を保つ
-  render(maskImage, { closeRadius, threshold, fgColor, bgColor, mirror = true }) {
+  render(maskImage, { closeRadius, threshold, fgColor, bgColor, mirror = true, cellSize = 18 }) {
     const gl = this.#gl;
     const W = this.#w, H = this.#h;
 
@@ -179,19 +208,29 @@ export class Renderer {
     this.#setUniforms(this.#hErodeR8Prog, { step: 1/W, r: closeRadius });
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // Pass 4: 垂直収縮 + 色付け + 反転 (fboA → screen)
-    // flipY は表示の上下補正で常時有効、flipX が UI の左右反転
+    // Pass 4: 垂直収縮 (fboA → fboB) でクロージング完成（二値マスク）
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.#fboB);
+    gl.viewport(0, 0, W, H);
+    gl.useProgram(this.#vErodeProg);
+    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexA);
+    this.#setUniforms(this.#vErodeProg, { step: 1/H, r: closeRadius });
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // Pass 5: グリッドモザイク化 + 色付け + 反転 (fboB → screen)
+    // flipY=0 で上下反転表示、flipX が UI の左右反転
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, W, H);
-    gl.useProgram(this.#vErodeColorProg);
-    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexA);
-    this.#setUniforms(this.#vErodeColorProg, {
-      flipX: mirror ? 1 : 0, flipY: 1, step: 1/H, r: closeRadius, fg: fgColor, bg: bgColor,
+    gl.useProgram(this.#mosaicProg);
+    gl.bindTexture(gl.TEXTURE_2D, this.#fbTexB);
+    this.#setUniforms(this.#mosaicProg, {
+      flipX: mirror ? 1 : 0, flipY: 0,
+      res: [W, H], cell: Math.max(2, cellSize),
+      fg: fgColor, bg: bgColor,
     });
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
 
-  #setUniforms(prog, { flipX = 0, flipY = 0, step, r, thresh, fg, bg } = {}) {
+  #setUniforms(prog, { flipX = 0, flipY = 0, step, r, thresh, fg, bg, res, cell } = {}) {
     const gl = this.#gl;
     const loc = name => gl.getUniformLocation(prog, name);
     gl.uniform1i(loc('u_flipX'), flipX);
@@ -201,6 +240,8 @@ export class Renderer {
     if (thresh !== undefined) gl.uniform1f(loc('u_thresh'), thresh);
     if (fg)                   gl.uniform4fv(loc('u_fg'),    fg);
     if (bg)                   gl.uniform4fv(loc('u_bg'),    bg);
+    if (res)                  gl.uniform2f(loc('u_res'),    res[0], res[1]);
+    if (cell   !== undefined) gl.uniform1f(loc('u_cell'),   cell);
   }
 
   #buildQuad() {
