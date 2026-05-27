@@ -1,14 +1,8 @@
-// MediaPipe Pose Landmarker: ポーズ(33 ランドマーク)とセグメンテーションを 1 回の推論で取得
-//   - VIDEO モードによりモデル内蔵の時間平滑化が効く（揺らぎが少ない）
-//   - 指キーポイント(thumb/index/pinky)が取れるので手首の曲げに依存しない手先判定
-//   - 左右の検出精度も BodyPix より安定
-const MEDIAPIPE_BASE  = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21';
-// 多人数検出のため LITE → FULL モデルに変更
-const POSE_MODEL_URL  = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
-// 多人数シルエット用: BodyPix segmentPerson 相当の selfie segmenter
-//   PoseLandmarker のセグメンテーションは「ポーズ毎」だが、こちらは画像全体を
-//   1 つの mask で返すので、人数や検出失敗に依らず確実に全員のシルエットが出る
-const SEG_MODEL_URL   = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
+// BodyPix の segmentMultiPersonParts を使う直接セグメンテーション方式
+//   - 複数人検出をモデルがネイティブに行うので、シルエットも人数を問わず正しく出る
+//   - 各画素に部位 ID が割り当てられるため、キーポイント→幾何学計算の中間処理が不要
+//   - 結果(セグメント)をそのまま色に変換するだけ
+const bodyPix = window['body-pix'];
 
 import { Camera }   from './camera.js';
 import { Renderer } from './renderer.js';
@@ -18,48 +12,35 @@ const canvas   = document.getElementById('canvas');
 const statusEl = document.getElementById('status');
 const fpsEl    = document.getElementById('fps');
 
-const CLOSE_RADIUS = 5;
-const THRESHOLD    = 0.5;
+// BodyPix の部位 ID 区分（COCO 24 部位）
+//   HEAD: face 左右 (= 0,1) — BodyPix に「頭部」カテゴリは無く face で代替
+//   HAND: hand 左右 (= 10,11)
+//   LEG : upper_leg + lower_leg + feet (= 14..21) すべて
+const HEAD_PARTS = new Set([0, 1]);
+const HAND_PARTS = new Set([10, 11]);
+const LEG_PARTS  = new Set([14, 15, 16, 17, 18, 19, 20, 21]);
 
-// 体マスクの時間平滑化 + ヒステリシス
+// 部位 → カテゴリ ID (大きい数値が「優先」)
+//   0=背景, 4=他の体, 3=脚, 2=手, 1=頭
+// 複数人で同一画素を別カテゴリで claim した場合は max を取る (= 高優先が勝つ)
+// ただし shader 側の塗り優先は別途 (hand > head > leg > body) なので、ここでは
+// シンプルに「どのカテゴリに該当するか」を 1 段で記録する
+const CAT_BG=0, CAT_HEAD=1, CAT_HAND=2, CAT_LEG=3, CAT_BODY=4;
+
+// 時間平滑化 + ヒステリシス（端の点滅対策）
 const EMA_ALPHA = 0.5;
 const HYST_HIGH = 0.7;
 const HYST_LOW  = 0.3;
 
-// MediaPipe Pose のランドマークインデックス(33 点)
-const MP = {
-  nose: 0,
-  leftEar: 7,  rightEar: 8,
-  leftShoulder: 11, rightShoulder: 12,
-  leftElbow: 13, rightElbow: 14,
-  leftWrist: 15, rightWrist: 16,
-  leftPinky: 17, rightPinky: 18,
-  leftIndex: 19, rightIndex: 20,
-  leftThumb: 21, rightThumb: 22,
-  leftHip: 23,  rightHip: 24,
-  leftKnee: 25, rightKnee: 26,
-  leftAnkle: 27, rightAnkle: 28,
-  leftFootIndex: 31, rightFootIndex: 32,
+const INFERENCE_CONFIG = {
+  flipHorizontal:        false,
+  internalResolution:    'medium',
+  segmentationThreshold: 0.7,
+  // 多人数検出のためのポーズ検出パラメタ
+  maxDetections:    5,
+  scoreThreshold:   0.3,
+  nmsRadius:        20,
 };
-
-// キーポイント時間平滑化 + 採否ヒステリシス（揺らぎ対策）
-// MediaPipe 自体の平滑化に加えて二重の安定化
-const POSE_ALPHA = 0.6;
-const POSE_TTL   = 2;
-const KP_ENTRY        = 0.40, KP_EXIT        = 0.20;
-const KP_ENTRY_WRIST  = 0.50, KP_EXIT_WRIST  = 0.25;
-const KP_ENTRY_FINGER = 0.30, KP_EXIT_FINGER = 0.15;
-const KP_ENTRY_LEG    = 0.30, KP_EXIT_LEG    = 0.15;
-
-// 複数人対応: 各ポーズインデックス毎に独立した平滑化状態を持つ
-const MAX_POSES = 4;
-const poseState = {
-  kps: Array.from({ length: MAX_POSES }, () => ({})),
-  frame: 0,
-};
-function resetPoseState() {
-  for (let i = 0; i < MAX_POSES; i++) poseState.kps[i] = {};
-}
 
 // --- UI controls ---
 const ctrlFg     = document.getElementById('ctrl-fg');
@@ -108,177 +89,21 @@ ctrlCell.addEventListener('input', () => {
   ctrlCellVal.textContent = ctrlCell.value + 'px';
 });
 
-// shader 側の配列サイズと一致
-const MAX_LEG_SEGS   = 6;
-const MAX_NONLEG_PTS = 8;
-const MAX_HAND_BS    = 3;
-
-// 複数人ポーズ用の flat 配列構造を作る
-function emptyPoses() {
-  return {
-    poseCount: 0,
-    headPos:    new Float32Array(MAX_POSES * 2),
-    headR:      new Float32Array(MAX_POSES),
-    handLA:     new Float32Array(MAX_POSES * 2),
-    handLBs:    new Float32Array(MAX_POSES * MAX_HAND_BS * 2),
-    handLBCount:new Int32Array  (MAX_POSES),
-    handLR:     new Float32Array(MAX_POSES),
-    handRA:     new Float32Array(MAX_POSES * 2),
-    handRBs:    new Float32Array(MAX_POSES * MAX_HAND_BS * 2),
-    handRBCount:new Int32Array  (MAX_POSES),
-    handRR:     new Float32Array(MAX_POSES),
-    legSegA:    new Float32Array(MAX_POSES * MAX_LEG_SEGS * 2),
-    legSegB:    new Float32Array(MAX_POSES * MAX_LEG_SEGS * 2),
-    legSegCount:new Int32Array  (MAX_POSES),
-    nonLegPts:  new Float32Array(MAX_POSES * MAX_NONLEG_PTS * 2),
-    nonLegCount:new Int32Array  (MAX_POSES),
-    legOn:      new Int32Array  (MAX_POSES),
-    legRadius:  new Float32Array(MAX_POSES),
-  };
+// 部位 ID → カテゴリ
+function partToCat(part) {
+  if (part < 0)              return CAT_BG;
+  if (HEAD_PARTS.has(part))  return CAT_HEAD;
+  if (HAND_PARTS.has(part))  return CAT_HAND;
+  if (LEG_PARTS .has(part))  return CAT_LEG;
+  return CAT_BODY;
 }
 
-// 1 人分のランドマークを ポーズインデックス pi の位置に書き込む
-function buildOnePose(out, pi, landmarks, camW, camH) {
-  const kpState = poseState.kps[pi];
-  const frame   = poseState.frame;
-  const arr     = landmarks || [];
-
-  // sm: ポーズごとに独立した平滑化＋採否ヒステリシス＋TTL
-  const sm = (i, entry = KP_ENTRY, exit = KP_EXIT) => {
-    const lm = arr[i];
-    const vis = lm ? (lm.visibility ?? 1) : 0;
-    const prev = kpState[i];
-    const wasValid = !!prev && (frame - prev.lastValid) <= POSE_TTL;
-    const thresh = wasValid ? exit : entry;
-    if (lm && vis >= thresh) {
-      const raw = [lm.x * camW, lm.y * camH];
-      const smoothed = (prev && (frame - prev.lastValid) <= 1)
-        ? [POSE_ALPHA * raw[0] + (1 - POSE_ALPHA) * prev.pos[0],
-           POSE_ALPHA * raw[1] + (1 - POSE_ALPHA) * prev.pos[1]]
-        : raw;
-      kpState[i] = { pos: smoothed, lastValid: frame };
-      return smoothed;
-    } else if (wasValid) {
-      return prev.pos;
-    } else {
-      delete kpState[i];
-      return null;
-    }
-  };
-
-  const nose          = sm(MP.nose);
-  const leftEar       = sm(MP.leftEar,  0.20, 0.10);
-  const rightEar      = sm(MP.rightEar, 0.20, 0.10);
-  const leftShoulder  = sm(MP.leftShoulder);
-  const rightShoulder = sm(MP.rightShoulder);
-
-  const leftWrist  = sm(MP.leftWrist,  KP_ENTRY_WRIST, KP_EXIT_WRIST);
-  const rightWrist = sm(MP.rightWrist, KP_ENTRY_WRIST, KP_EXIT_WRIST);
-  const leftIndex  = sm(MP.leftIndex,  KP_ENTRY_FINGER, KP_EXIT_FINGER);
-  const rightIndex = sm(MP.rightIndex, KP_ENTRY_FINGER, KP_EXIT_FINGER);
-  const leftPinky  = sm(MP.leftPinky,  KP_ENTRY_FINGER, KP_EXIT_FINGER);
-  const rightPinky = sm(MP.rightPinky, KP_ENTRY_FINGER, KP_EXIT_FINGER);
-  const leftThumb  = sm(MP.leftThumb,  KP_ENTRY_FINGER, KP_EXIT_FINGER);
-  const rightThumb = sm(MP.rightThumb, KP_ENTRY_FINGER, KP_EXIT_FINGER);
-
-  const leftHip      = sm(MP.leftHip,      KP_ENTRY_LEG, KP_EXIT_LEG);
-  const rightHip     = sm(MP.rightHip,     KP_ENTRY_LEG, KP_EXIT_LEG);
-  const leftKnee     = sm(MP.leftKnee,     KP_ENTRY_LEG, KP_EXIT_LEG);
-  const rightKnee    = sm(MP.rightKnee,    KP_ENTRY_LEG, KP_EXIT_LEG);
-  const leftAnkle    = sm(MP.leftAnkle,    KP_ENTRY_LEG, KP_EXIT_LEG);
-  const rightAnkle   = sm(MP.rightAnkle,   KP_ENTRY_LEG, KP_EXIT_LEG);
-  const leftFootIdx  = sm(MP.leftFootIndex,  KP_ENTRY_LEG, KP_EXIT_LEG);
-  const rightFootIdx = sm(MP.rightFootIndex, KP_ENTRY_LEG, KP_EXIT_LEG);
-  const leftElbow    = sm(MP.leftElbow);
-  const rightElbow   = sm(MP.rightElbow);
-
-  const dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
-  const bodyScale = (leftShoulder && rightShoulder)
-    ? dist(leftShoulder, rightShoulder)
-    : 150;
-
-  // 頭
-  if (leftEar && rightEar) {
-    out.headPos[pi*2]   = (leftEar[0] + rightEar[0]) / 2;
-    out.headPos[pi*2+1] = (leftEar[1] + rightEar[1]) / 2;
-    out.headR[pi] = dist(leftEar, rightEar) * 1.05;
-  } else if (nose) {
-    out.headPos[pi*2]   = nose[0];
-    out.headPos[pi*2+1] = nose[1];
-    out.headR[pi] = bodyScale * 0.55;
-  }
-
-  // 手 (multi-capsule)
-  const handRadius = Math.max(bodyScale * 0.25, 28);
-  const writeHand = (A, Bs, baseA, baseBs, countArr, rArr) => {
-    if (!A) return;
-    out[baseA][pi*2]   = A[0];
-    out[baseA][pi*2+1] = A[1];
-    const detected = Bs.filter(p => p !== null);
-    const real = detected.length > 0 ? detected : [A];
-    const count = Math.min(real.length, MAX_HAND_BS);
-    const base = pi * MAX_HAND_BS * 2;
-    for (let i = 0; i < count; i++) {
-      out[baseBs][base + i*2]   = real[i][0];
-      out[baseBs][base + i*2+1] = real[i][1];
-    }
-    out[countArr][pi] = count;
-    out[rArr][pi] = handRadius;
-  };
-  writeHand(leftWrist,  [leftThumb,  leftIndex,  leftPinky],
-            'handLA', 'handLBs', 'handLBCount', 'handLR');
-  writeHand(rightWrist, [rightThumb, rightIndex, rightPinky],
-            'handRA', 'handRBs', 'handRBCount', 'handRR');
-
-  // 脚 polyline
-  const segs = [];
-  const addSeg = (a, b) => { if (a && b) segs.push([a, b]); };
-  addSeg(leftHip,    leftKnee);
-  addSeg(leftKnee,   leftAnkle);
-  addSeg(leftAnkle,  leftFootIdx);
-  addSeg(rightHip,   rightKnee);
-  addSeg(rightKnee,  rightAnkle);
-  addSeg(rightAnkle, rightFootIdx);
-  const segCount = Math.min(segs.length, MAX_LEG_SEGS);
-  const legBase = pi * MAX_LEG_SEGS * 2;
-  for (let i = 0; i < segCount; i++) {
-    out.legSegA[legBase + i*2]   = segs[i][0][0];
-    out.legSegA[legBase + i*2+1] = segs[i][0][1];
-    out.legSegB[legBase + i*2]   = segs[i][1][0];
-    out.legSegB[legBase + i*2+1] = segs[i][1][1];
-  }
-  out.legSegCount[pi] = segCount;
-
-  // 非脚キーポイント (Voronoi 対立点)
-  const nonLeg = [];
-  for (const k of [leftShoulder, rightShoulder, leftElbow, rightElbow,
-                   leftWrist,    rightWrist,    leftHip,   rightHip]) {
-    if (k) nonLeg.push(k);
-  }
-  const nonLegCount = Math.min(nonLeg.length, MAX_NONLEG_PTS);
-  const nonLegBase = pi * MAX_NONLEG_PTS * 2;
-  for (let i = 0; i < nonLegCount; i++) {
-    out.nonLegPts[nonLegBase + i*2]   = nonLeg[i][0];
-    out.nonLegPts[nonLegBase + i*2+1] = nonLeg[i][1];
-  }
-  out.nonLegCount[pi] = nonLegCount;
-  out.legOn[pi]       = segCount > 0 ? 1 : 0;
-  // 絶対距離ガード: 他の人の脚骨格が遠くから誤マッチしないよう、
-  // bodyScale * 0.5 ≒ 半身分の距離を上限にする
-  out.legRadius[pi]   = Math.max(bodyScale * 0.5, 60);
-}
-
-// すべてのポーズを処理して flat 配列を返す
-function buildPoses(allLandmarks, camW, camH) {
-  poseState.frame++;
-  const out = emptyPoses();
-  const list = allLandmarks || [];
-  const n = Math.min(list.length, MAX_POSES);
-  for (let pi = 0; pi < n; pi++) {
-    buildOnePose(out, pi, list[pi], camW, camH);
-  }
-  out.poseCount = n;
-  return out;
+// 一画素分の EMA + ヒステリシス を smoothedArr/binaryArr に反映
+function emaHyst(smoothedArr, binaryArr, i, currVal) {
+  const s = EMA_ALPHA * currVal + (1 - EMA_ALPHA) * smoothedArr[i];
+  smoothedArr[i] = s;
+  if (binaryArr[i]) { if (s < HYST_LOW)  binaryArr[i] = 0; }
+  else              { if (s > HYST_HIGH) binaryArr[i] = 1; }
 }
 
 // --- Main ---
@@ -304,21 +129,21 @@ async function main() {
   window.addEventListener('resize', fitCanvas);
   ctrlScale.addEventListener('input', fitCanvas);
 
-  // マスクキャンバスと状態
+  // --- マスク状態 ---
+  // RGBA に 4 カテゴリ × 二値を詰める: R=head, G=hand, B=leg, A=body
   const maskCanvas = document.createElement('canvas');
   const maskCtx    = maskCanvas.getContext('2d', { willReadFrequently: false });
-  let smoothedBody = null;
-  let binaryBody   = null;
-  let reuseBuf     = null;
-  let reuseBufN    = 0;
-  let paused       = false;
+  let smHead = null, smHand = null, smLeg = null, smBody = null; // Float32 EMA
+  let bnHead = null, bnHand = null, bnLeg = null, bnBody = null; // Uint8 binary
+  let buf    = null;                                              // RGBA 書き出しバッファ
+  let paused = false;
 
   function syncMaskSize() {
     maskCanvas.width  = camera.width;
     maskCanvas.height = camera.height;
-    smoothedBody = null;
-    binaryBody   = null;
-    resetPoseState();
+    smHead = smHand = smLeg = smBody = null;
+    bnHead = bnHand = bnLeg = bnBody = null;
+    buf    = null;
   }
   syncMaskSize();
 
@@ -358,136 +183,98 @@ async function main() {
   await populateCameras();
   navigator.mediaDevices.addEventListener('devicechange', populateCameras);
 
-  // --- MediaPipe のロード ---
-  statusEl.textContent = 'MediaPipe を読み込み中...';
-  let PoseLandmarker, ImageSegmenter, FilesetResolver;
-  try {
-    const m = await import(MEDIAPIPE_BASE + '/vision_bundle.mjs');
-    PoseLandmarker  = m.PoseLandmarker;
-    ImageSegmenter  = m.ImageSegmenter;
-    FilesetResolver = m.FilesetResolver;
-  } catch (e) {
-    statusEl.textContent = 'MediaPipe 読み込み失敗: ' + e.message;
-    throw e;
-  }
-
-  const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_BASE + '/wasm');
-
-  // PoseLandmarker: キーポイント検出専用 (segmentation は使わない)
-  let poseLandmarker;
-  const poseConfig = {
-    runningMode: 'VIDEO',
-    numPoses: MAX_POSES,
-    // 多人数検出のため閾値を下げる
-    minPoseDetectionConfidence: 0.3,
-    minPosePresenceConfidence:  0.3,
-    minTrackingConfidence:      0.3,
-    outputSegmentationMasks: false, // ImageSegmenter に任せる
-  };
-  try {
-    poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate: 'GPU' },
-      ...poseConfig,
-    });
-  } catch (e) {
-    console.warn('Pose: GPU 推論不可、CPU にフォールバック:', e);
-    poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate: 'CPU' },
-      ...poseConfig,
-    });
-  }
-
-  // ImageSegmenter: シルエット専用 (画像全体で人 vs 背景の 1 マスク = 多人数 OK)
-  let imageSegmenter;
-  const segConfig = {
-    runningMode: 'VIDEO',
-    outputCategoryMask: false,
-    outputConfidenceMasks: true,
-  };
-  try {
-    imageSegmenter = await ImageSegmenter.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: SEG_MODEL_URL, delegate: 'GPU' },
-      ...segConfig,
-    });
-  } catch (e) {
-    console.warn('Segmenter: GPU 推論不可、CPU にフォールバック:', e);
-    imageSegmenter = await ImageSegmenter.createFromOptions(vision, {
-      baseOptions: { modelAssetPath: SEG_MODEL_URL, delegate: 'CPU' },
-      ...segConfig,
-    });
-  }
+  // --- BodyPix モデル ---
+  statusEl.textContent = 'BodyPix を読み込み中...';
+  const net = await bodyPix.load({
+    architecture: 'MobileNetV1',
+    outputStride: 16,
+    multiplier:   0.75,
+    quantBytes:   2,
+  });
 
   statusEl.textContent = '実行中';
 
   let frameCount  = 0;
   let lastFpsTime = performance.now();
-  let lastTs      = 0;
+  let processing  = false;
 
   function loop() {
-    if (camera.ready && !paused) {
-      try {
-        let ts = performance.now();
-        if (ts <= lastTs) ts = lastTs + 1; // VIDEO モードは厳密に単調増加が必要
-        lastTs = ts;
+    if (camera.ready && !processing && !paused) {
+      processing = true;
 
-        // --- 2 系統の推論を並走 ---
-        // 1) ImageSegmenter: 画像全体 → 単一の人マスク (多人数も 1 つにまとまる)
-        // 2) PoseLandmarker: 最大 MAX_POSES 人分のキーポイント
-        const segResult  = imageSegmenter.segmentForVideo(camera.element, ts);
-        const poseResult = poseLandmarker.detectForVideo(camera.element, ts);
+      // 多人数の部位セグメンテーション
+      //   返り値: PersonSegmentation[] — 各人 1 つの { data: Int32Array, width, height, pose }
+      //   data[i] は その人 が claim する画素の部位 ID。claim していない画素は -1
+      net.segmentMultiPersonParts(camera.element, INFERENCE_CONFIG).then(segs => {
+        if (segs && segs.length > 0) {
+          const w = segs[0].width, h = segs[0].height;
+          const N = w * h;
 
-        // セグメンテーション処理: confidenceMasks[0] が「前景(人)」の信頼度マスク
-        const segMasks = segResult.confidenceMasks;
-        if (segMasks && segMasks.length > 0) {
-          const mask = segMasks[0];
-          const data = mask.getAsFloat32Array();
-          const w = mask.width, h = mask.height;
-          const N = data.length;
-
-          if (!smoothedBody || smoothedBody.length !== N) {
-            smoothedBody = new Float32Array(N);
-            binaryBody   = new Uint8Array(N);
-            for (let i = 0; i < N; i++) {
-              smoothedBody[i] = data[i];
-              binaryBody[i]   = data[i] > 0.5 ? 1 : 0;
-            }
-          } else {
-            for (let i = 0; i < N; i++) {
-              const v = data[i];
-              const s = EMA_ALPHA * v + (1 - EMA_ALPHA) * smoothedBody[i];
-              smoothedBody[i] = s;
-              if (binaryBody[i]) { if (s < HYST_LOW)  binaryBody[i] = 0; }
-              else               { if (s > HYST_HIGH) binaryBody[i] = 1; }
-            }
+          if (!smHead || smHead.length !== N) {
+            smHead = new Float32Array(N); smHand = new Float32Array(N);
+            smLeg  = new Float32Array(N); smBody = new Float32Array(N);
+            bnHead = new Uint8Array  (N); bnHand = new Uint8Array  (N);
+            bnLeg  = new Uint8Array  (N); bnBody = new Uint8Array  (N);
+            buf    = new Uint8ClampedArray(N * 4);
           }
 
+          // 各画素ごとに全員分の部位 ID を走査して カテゴリ を決定
+          // 同画素を複数人が claim することは原則無いが、念のため最大優先カテゴリを採用
+          for (let i = 0; i < N; i++) {
+            let cat = CAT_BG;
+            for (let pi = 0; pi < segs.length; pi++) {
+              const c = partToCat(segs[pi].data[i]);
+              if (c !== CAT_BG && (cat === CAT_BG || c < cat)) cat = c;
+              // 上の条件: BG 以外で、より高優先 (HEAD=1 / HAND=2 / LEG=3 / BODY=4 の中で
+              //           小さい番号 = 体表面側に近い識別、HEAD > HAND > LEG > BODY と扱う)
+              // ※ shader 側の塗り優先 (hand > head > leg > body) とは別。
+              //    ここでは「何のセグメントだったか」だけ確定させる
+            }
+            // 各カテゴリ二値の今フレーム値
+            const cHead = cat === CAT_HEAD ? 1 : 0;
+            const cHand = cat === CAT_HAND ? 1 : 0;
+            const cLeg  = cat === CAT_LEG  ? 1 : 0;
+            const cBody = cat !== CAT_BG   ? 1 : 0;
+
+            emaHyst(smHead, bnHead, i, cHead);
+            emaHyst(smHand, bnHand, i, cHand);
+            emaHyst(smLeg,  bnLeg,  i, cLeg );
+            emaHyst(smBody, bnBody, i, cBody);
+          }
+
+          // RGBA バッファに 4 カテゴリ二値を詰める
+          for (let i = 0; i < N; i++) {
+            buf[i * 4 + 0] = bnHead[i] ? 255 : 0; // R = head
+            buf[i * 4 + 1] = bnHand[i] ? 255 : 0; // G = hand
+            buf[i * 4 + 2] = bnLeg [i] ? 255 : 0; // B = leg
+            buf[i * 4 + 3] = bnBody[i] ? 255 : 0; // A = body
+          }
           if (maskCanvas.width !== w || maskCanvas.height !== h) {
             maskCanvas.width = w; maskCanvas.height = h;
           }
-          if (!reuseBuf || reuseBufN !== N * 4) {
-            reuseBuf = new Uint8ClampedArray(N * 4);
-            reuseBufN = N * 4;
+          maskCtx.putImageData(new ImageData(buf, w, h), 0, 0);
+        } else {
+          // 検出 0 人: マスクをクリア
+          if (buf) buf.fill(0);
+          if (smBody) { smBody.fill(0); bnBody.fill(0); }
+          if (smHead) { smHead.fill(0); bnHead.fill(0); }
+          if (smHand) { smHand.fill(0); bnHand.fill(0); }
+          if (smLeg ) { smLeg .fill(0); bnLeg .fill(0); }
+          if (buf) {
+            maskCtx.putImageData(new ImageData(buf, maskCanvas.width, maskCanvas.height), 0, 0);
           }
-          for (let i = 0; i < N; i++) {
-            reuseBuf[i * 4 + 3] = binaryBody[i] ? 255 : 0;
-          }
-          maskCtx.putImageData(new ImageData(reuseBuf, w, h), 0, 0);
-          mask.close();
         }
 
-        // 全員分のポーズランドマークから色領域を構築
-        const pose = buildPoses(poseResult.landmarks, camera.width, camera.height);
-
         renderer.render(maskCanvas, {
-          closeRadius: CLOSE_RADIUS,
-          threshold:   THRESHOLD,
           camW: camera.width, camH: camera.height,
-          pose,
           ...config,
         });
-      } catch (e) {
-        console.error('MediaPipe inference error:', e);
-      }
+
+        processing = false;
+      }).catch(err => {
+        console.error('BodyPix error:', err);
+        processing = false;
+      });
     }
 
     frameCount++;
