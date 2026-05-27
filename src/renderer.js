@@ -106,12 +106,17 @@ uniform vec4  u_leg;
 // キーポイント（カメラ画素座標）。半径/フラグが 0 のときは無効
 uniform vec2  u_headPos;
 uniform float u_headR;
-// 手はキャプセル(線分+半径)。A=手首, B=指先方向への延長点
-uniform vec2  u_handLA;
-uniform vec2  u_handLB;
+// 手は「手首(A) から 各指(親指/人差し指/小指) への複数キャプセル」の和集合
+//   - 開いた手の横スプレッドを単一キャプセルでは radius が足りずカバー漏れする問題への対処
+//   - 半キャプセル(distSeg)なので手首より前腕側は塗らない
+const int MAX_HAND_BS = 3;
+uniform vec2 u_handLA;
+uniform vec2 u_handLBs[MAX_HAND_BS];
+uniform int  u_handLBCount;
 uniform float u_handLR;
-uniform vec2  u_handRA;
-uniform vec2  u_handRB;
+uniform vec2 u_handRA;
+uniform vec2 u_handRBs[MAX_HAND_BS];
+uniform int  u_handRBCount;
 uniform float u_handRR;
 // 脚は Voronoi(最近傍)で分類:
 //   脚骨格 (hip→knee→ankle→foot のポリライン) との距離 と
@@ -179,8 +184,19 @@ void main() {
   }
   bool inLeg  = u_legOn != 0 && u_legSegCount > 0 && dLeg < dNonLeg;
   bool inHead = u_headR > 0.0 && distance(p, u_headPos) < u_headR;
-  bool inHand = (u_handLR > 0.0 && distSeg(p, u_handLA, u_handLB) < u_handLR) ||
-                (u_handRR > 0.0 && distSeg(p, u_handRA, u_handRB) < u_handRR);
+  bool inHand = false;
+  if (u_handLR > 0.0) {
+    for (int i = 0; i < MAX_HAND_BS; i++) {
+      if (i >= u_handLBCount) break;
+      if (distSeg(p, u_handLA, u_handLBs[i]) < u_handLR) { inHand = true; break; }
+    }
+  }
+  if (!inHand && u_handRR > 0.0) {
+    for (int i = 0; i < MAX_HAND_BS; i++) {
+      if (i >= u_handRBCount) break;
+      if (distSeg(p, u_handRA, u_handRBs[i]) < u_handRR) { inHand = true; break; }
+    }
+  }
 
   vec4 col = u_fg;
   if (inLeg)  col = u_leg;
@@ -337,12 +353,14 @@ export class Renderer {
     if (pose) {
       gl.uniform2f(loc('u_headPos'),   pose.headPos[0],   pose.headPos[1]);
       gl.uniform1f(loc('u_headR'),     pose.headR);
-      gl.uniform2f(loc('u_handLA'),    pose.handLA[0],    pose.handLA[1]);
-      gl.uniform2f(loc('u_handLB'),    pose.handLB[0],    pose.handLB[1]);
-      gl.uniform1f(loc('u_handLR'),    pose.handLR);
-      gl.uniform2f(loc('u_handRA'),    pose.handRA[0],    pose.handRA[1]);
-      gl.uniform2f(loc('u_handRB'),    pose.handRB[0],    pose.handRB[1]);
-      gl.uniform1f(loc('u_handRR'),    pose.handRR);
+      gl.uniform2f(loc('u_handLA'),       pose.handLA[0], pose.handLA[1]);
+      gl.uniform2fv(loc('u_handLBs'),     pose.handLBs);
+      gl.uniform1i(loc('u_handLBCount'),  pose.handLBCount);
+      gl.uniform1f(loc('u_handLR'),       pose.handLR);
+      gl.uniform2f(loc('u_handRA'),       pose.handRA[0], pose.handRA[1]);
+      gl.uniform2fv(loc('u_handRBs'),     pose.handRBs);
+      gl.uniform1i(loc('u_handRBCount'),  pose.handRBCount);
+      gl.uniform1f(loc('u_handRR'),       pose.handRR);
       gl.uniform2fv(loc('u_legSegA'),     pose.legSegA);
       gl.uniform2fv(loc('u_legSegB'),     pose.legSegB);
       gl.uniform1i(loc('u_legSegCount'),  pose.legSegCount);

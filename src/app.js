@@ -96,15 +96,16 @@ ctrlCell.addEventListener('input', () => {
   ctrlCellVal.textContent = ctrlCell.value + 'px';
 });
 
-// 脚判定用の配列サイズ (shader 側の MAX_LEG_SEGS, MAX_NONLEG_PTS と一致)
+// shader 側の配列サイズと一致
 const MAX_LEG_SEGS   = 6;
 const MAX_NONLEG_PTS = 8;
+const MAX_HAND_BS    = 3;
 
 function emptyPose() {
   return {
     headPos: [0, 0], headR: 0,
-    handLA:  [0, 0], handLB: [0, 0], handLR: 0,
-    handRA:  [0, 0], handRB: [0, 0], handRR: 0,
+    handLA:  [0, 0], handLBs: new Float32Array(MAX_HAND_BS * 2), handLBCount: 0, handLR: 0,
+    handRA:  [0, 0], handRBs: new Float32Array(MAX_HAND_BS * 2), handRBCount: 0, handRR: 0,
     legSegA: new Float32Array(MAX_LEG_SEGS   * 2),
     legSegB: new Float32Array(MAX_LEG_SEGS   * 2),
     nonLegPts: new Float32Array(MAX_NONLEG_PTS * 2),
@@ -186,28 +187,37 @@ function buildPose(landmarks, camW, camH) {
     out.headR   = bodyScale * 0.55;
   }
 
-  // 手首から先(半キャプセル): A=手首、B=指キーポイントの重心
-  //   指(thumb/index/pinky)を平均することで「手首がどの向きに曲がっても」
-  //   B は実際の指先付近に来る → 手首の角度に依存しない正確な手先判定
-  const meanPos = (pts) => {
-    const v = pts.filter(p => p !== null);
-    if (v.length === 0) return null;
-    let sx = 0, sy = 0;
-    for (const p of v) { sx += p[0]; sy += p[1]; }
-    return [sx / v.length, sy / v.length];
-  };
+  // 手首から先: 手首(A) から 親指/人差し指/小指 への複数キャプセルの和集合
+  //   開いた手の横スプレッドを単一キャプセルでは radius が足りずカバー漏れする問題に対処
+  //   検出された指だけキャプセルを伸ばす (見えてない指はスキップ)
+  //   指が 1 本も検出されない場合は手首位置の縮退キャプセル(=円)にフォールバック
   const handRadius = Math.max(bodyScale * 0.25, 28);
 
-  const fL = meanPos([leftIndex, leftPinky, leftThumb]);
+  const fillHandBs = (Bs, target) => {
+    const detected = Bs.filter(p => p !== null);
+    return detected.length > 0 ? detected : [target]; // 縮退時は wrist 位置で円
+  };
+
   if (leftWrist) {
     out.handLA = leftWrist;
-    out.handLB = fL || leftWrist; // 指が全部低信頼なら手首位置(キャプセル長 0)
+    const Bs = fillHandBs([leftThumb, leftIndex, leftPinky], leftWrist);
+    const count = Math.min(Bs.length, MAX_HAND_BS);
+    for (let i = 0; i < count; i++) {
+      out.handLBs[i * 2]     = Bs[i][0];
+      out.handLBs[i * 2 + 1] = Bs[i][1];
+    }
+    out.handLBCount = count;
     out.handLR = handRadius;
   }
-  const fR = meanPos([rightIndex, rightPinky, rightThumb]);
   if (rightWrist) {
     out.handRA = rightWrist;
-    out.handRB = fR || rightWrist;
+    const Bs = fillHandBs([rightThumb, rightIndex, rightPinky], rightWrist);
+    const count = Math.min(Bs.length, MAX_HAND_BS);
+    for (let i = 0; i < count; i++) {
+      out.handRBs[i * 2]     = Bs[i][0];
+      out.handRBs[i * 2 + 1] = Bs[i][1];
+    }
+    out.handRBCount = count;
     out.handRR = handRadius;
   }
 
