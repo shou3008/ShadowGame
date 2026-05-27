@@ -103,36 +103,37 @@ uniform vec4  u_hand;
 uniform vec4  u_head;
 uniform vec4  u_leg;
 
-// キーポイント（カメラ画素座標）。半径/フラグが 0 のときは無効
-uniform vec2  u_headPos;
-uniform float u_headR;
-// 手は「手首(A) から 各指(親指/人差し指/小指) への複数キャプセル」の和集合
-//   - 開いた手の横スプレッドを単一キャプセルでは radius が足りずカバー漏れする問題への対処
-//   - 半キャプセル(distSeg)なので手首より前腕側は塗らない
-const int MAX_HAND_BS = 3;
-uniform vec2 u_handLA;
-uniform vec2 u_handLBs[MAX_HAND_BS];
-uniform int  u_handLBCount;
-uniform float u_handLR;
-uniform vec2 u_handRA;
-uniform vec2 u_handRBs[MAX_HAND_BS];
-uniform int  u_handRBCount;
-uniform float u_handRR;
-// 脚は Voronoi(最近傍)で分類:
-//   脚骨格 (hip→knee→ankle→foot のポリライン) との距離 と
-//   非脚キーポイント (shoulders, elbows, wrists, hips) との距離 を比較
-//   脚骨格が近ければ脚扱い。これにより:
-//     - 脚を高く上げても OK (骨格に追従する)
-//     - 胴体・腕への漏れは原理的に起きない (それらは非脚点の方が近い)
-//     - 腰の上下も自然に分かれる (両股関節を非脚点に含めることでバイアス)
-const int MAX_LEG_SEGS   = 6;  // 3 セグメント × 2 脚
-const int MAX_NONLEG_PTS = 8;  // shoulder/elbow/wrist/hip × 2
-uniform vec2 u_legSegA[MAX_LEG_SEGS];
-uniform vec2 u_legSegB[MAX_LEG_SEGS];
-uniform int  u_legSegCount;
-uniform vec2 u_nonLegPts[MAX_NONLEG_PTS];
-uniform int  u_nonLegCount;
-uniform int  u_legOn;
+// === 複数人対応 ===
+// 全 uniform を「ポーズインデックス順の flat 配列」に変更
+//   - 体マスクは全員分を JS 側で max 合成して u_tex に渡す
+//   - キーポイント系は per-pose に配列化して 1 シェーダで全員のチェックを行う
+const int MAX_POSES      = 4;
+const int MAX_HAND_BS    = 3;
+const int MAX_LEG_SEGS   = 6;
+const int MAX_NONLEG_PTS = 8;
+
+uniform int u_poseCount; // 有効なポーズ数(0..MAX_POSES)
+
+uniform vec2  u_headPos[MAX_POSES];
+uniform float u_headR  [MAX_POSES];
+
+uniform vec2  u_handLA      [MAX_POSES];
+uniform vec2  u_handLBs     [MAX_POSES * MAX_HAND_BS]; // flat
+uniform int   u_handLBCount [MAX_POSES];
+uniform float u_handLR      [MAX_POSES];
+uniform vec2  u_handRA      [MAX_POSES];
+uniform vec2  u_handRBs     [MAX_POSES * MAX_HAND_BS];
+uniform int   u_handRBCount [MAX_POSES];
+uniform float u_handRR      [MAX_POSES];
+
+uniform vec2  u_legSegA    [MAX_POSES * MAX_LEG_SEGS];
+uniform vec2  u_legSegB    [MAX_POSES * MAX_LEG_SEGS];
+uniform int   u_legSegCount[MAX_POSES];
+uniform vec2  u_nonLegPts  [MAX_POSES * MAX_NONLEG_PTS];
+uniform int   u_nonLegCount[MAX_POSES];
+uniform int   u_legOn      [MAX_POSES];
+// 脚 Voronoi の絶対距離ガード: 他の人の脚骨格が遠くからゆるく当たらないように
+uniform float u_legRadius  [MAX_POSES];
 
 in vec2 v_uv;
 out vec4 fragColor;
@@ -171,31 +172,59 @@ void main() {
   // セル中心をカメラ画素座標へ変換
   vec2 p = (center / u_res) * u_cam;
 
-  // 脚: Voronoi 判定 — 脚骨格 polyline に最も近い ⇔ 脚
-  float dLeg = 1e10;
-  for (int i = 0; i < MAX_LEG_SEGS; i++) {
-    if (i >= u_legSegCount) break;
-    dLeg = min(dLeg, distSeg(p, u_legSegA[i], u_legSegB[i]));
-  }
-  float dNonLeg = 1e10;
-  for (int i = 0; i < MAX_NONLEG_PTS; i++) {
-    if (i >= u_nonLegCount) break;
-    dNonLeg = min(dNonLeg, distance(p, u_nonLegPts[i]));
-  }
-  bool inLeg  = u_legOn != 0 && u_legSegCount > 0 && dLeg < dNonLeg;
-  bool inHead = u_headR > 0.0 && distance(p, u_headPos) < u_headR;
+  // 複数人: 各領域チェックをポーズで OR
+  //   一つでもいずれかのポーズで領域内なら該当色にする
+  bool inHead = false;
   bool inHand = false;
-  if (u_handLR > 0.0) {
-    for (int i = 0; i < MAX_HAND_BS; i++) {
-      if (i >= u_handLBCount) break;
-      if (distSeg(p, u_handLA, u_handLBs[i]) < u_handLR) { inHand = true; break; }
+  bool inLeg  = false;
+
+  for (int pi = 0; pi < MAX_POSES; pi++) {
+    if (pi >= u_poseCount) break;
+
+    // 頭(円)
+    if (!inHead && u_headR[pi] > 0.0 && distance(p, u_headPos[pi]) < u_headR[pi]) {
+      inHead = true;
     }
-  }
-  if (!inHand && u_handRR > 0.0) {
-    for (int i = 0; i < MAX_HAND_BS; i++) {
-      if (i >= u_handRBCount) break;
-      if (distSeg(p, u_handRA, u_handRBs[i]) < u_handRR) { inHand = true; break; }
+
+    // 手 (左 + 右、各々最大 MAX_HAND_BS 本のキャプセル)
+    if (!inHand && u_handLR[pi] > 0.0) {
+      for (int i = 0; i < MAX_HAND_BS; i++) {
+        if (i >= u_handLBCount[pi]) break;
+        if (distSeg(p, u_handLA[pi], u_handLBs[pi * MAX_HAND_BS + i]) < u_handLR[pi]) {
+          inHand = true; break;
+        }
+      }
     }
+    if (!inHand && u_handRR[pi] > 0.0) {
+      for (int i = 0; i < MAX_HAND_BS; i++) {
+        if (i >= u_handRBCount[pi]) break;
+        if (distSeg(p, u_handRA[pi], u_handRBs[pi * MAX_HAND_BS + i]) < u_handRR[pi]) {
+          inHand = true; break;
+        }
+      }
+    }
+
+    // 脚: Voronoi + 絶対距離ガード
+    if (!inLeg && u_legOn[pi] != 0 && u_legSegCount[pi] > 0) {
+      float dLeg = 1e10;
+      for (int i = 0; i < MAX_LEG_SEGS; i++) {
+        if (i >= u_legSegCount[pi]) break;
+        dLeg = min(dLeg, distSeg(p,
+          u_legSegA[pi * MAX_LEG_SEGS + i],
+          u_legSegB[pi * MAX_LEG_SEGS + i]));
+      }
+      // 絶対距離ガード: 他人の脚骨格が遠くから誤マッチしないように
+      if (dLeg <= u_legRadius[pi]) {
+        float dNonLeg = 1e10;
+        for (int i = 0; i < MAX_NONLEG_PTS; i++) {
+          if (i >= u_nonLegCount[pi]) break;
+          dNonLeg = min(dNonLeg, distance(p, u_nonLegPts[pi * MAX_NONLEG_PTS + i]));
+        }
+        if (dLeg < dNonLeg) inLeg = true;
+      }
+    }
+
+    if (inHead && inHand && inLeg) break; // 既に全て判定済みなら早期終了
   }
 
   vec4 col = u_fg;
@@ -351,22 +380,25 @@ export class Renderer {
     if (cam)                  gl.uniform2f(loc('u_cam'),    cam[0], cam[1]);
     if (cell   !== undefined) gl.uniform1f(loc('u_cell'),   cell);
     if (pose) {
-      gl.uniform2f(loc('u_headPos'),   pose.headPos[0],   pose.headPos[1]);
-      gl.uniform1f(loc('u_headR'),     pose.headR);
-      gl.uniform2f(loc('u_handLA'),       pose.handLA[0], pose.handLA[1]);
-      gl.uniform2fv(loc('u_handLBs'),     pose.handLBs);
-      gl.uniform1i(loc('u_handLBCount'),  pose.handLBCount);
-      gl.uniform1f(loc('u_handLR'),       pose.handLR);
-      gl.uniform2f(loc('u_handRA'),       pose.handRA[0], pose.handRA[1]);
-      gl.uniform2fv(loc('u_handRBs'),     pose.handRBs);
-      gl.uniform1i(loc('u_handRBCount'),  pose.handRBCount);
-      gl.uniform1f(loc('u_handRR'),       pose.handRR);
-      gl.uniform2fv(loc('u_legSegA'),     pose.legSegA);
-      gl.uniform2fv(loc('u_legSegB'),     pose.legSegB);
-      gl.uniform1i(loc('u_legSegCount'),  pose.legSegCount);
-      gl.uniform2fv(loc('u_nonLegPts'),   pose.nonLegPts);
-      gl.uniform1i(loc('u_nonLegCount'),  pose.nonLegCount);
-      gl.uniform1i(loc('u_legOn'),        pose.legOn);
+      // すべて per-pose flat 配列で渡す (要素 0..poseCount-1 のみ有効)
+      gl.uniform1i (loc('u_poseCount'),    pose.poseCount);
+      gl.uniform2fv(loc('u_headPos'),      pose.headPos);
+      gl.uniform1fv(loc('u_headR'),        pose.headR);
+      gl.uniform2fv(loc('u_handLA'),       pose.handLA);
+      gl.uniform2fv(loc('u_handLBs'),      pose.handLBs);
+      gl.uniform1iv(loc('u_handLBCount'),  pose.handLBCount);
+      gl.uniform1fv(loc('u_handLR'),       pose.handLR);
+      gl.uniform2fv(loc('u_handRA'),       pose.handRA);
+      gl.uniform2fv(loc('u_handRBs'),      pose.handRBs);
+      gl.uniform1iv(loc('u_handRBCount'),  pose.handRBCount);
+      gl.uniform1fv(loc('u_handRR'),       pose.handRR);
+      gl.uniform2fv(loc('u_legSegA'),      pose.legSegA);
+      gl.uniform2fv(loc('u_legSegB'),      pose.legSegB);
+      gl.uniform1iv(loc('u_legSegCount'),  pose.legSegCount);
+      gl.uniform2fv(loc('u_nonLegPts'),    pose.nonLegPts);
+      gl.uniform1iv(loc('u_nonLegCount'),  pose.nonLegCount);
+      gl.uniform1iv(loc('u_legOn'),        pose.legOn);
+      gl.uniform1fv(loc('u_legRadius'),    pose.legRadius);
     }
   }
 
