@@ -3,7 +3,12 @@
 //   - 指キーポイント(thumb/index/pinky)が取れるので手首の曲げに依存しない手先判定
 //   - 左右の検出精度も BodyPix より安定
 const MEDIAPIPE_BASE  = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.21';
-const POSE_MODEL_URL  = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task';
+// 多人数検出のため LITE → FULL モデルに変更
+const POSE_MODEL_URL  = 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task';
+// 多人数シルエット用: BodyPix segmentPerson 相当の selfie segmenter
+//   PoseLandmarker のセグメンテーションは「ポーズ毎」だが、こちらは画像全体を
+//   1 つの mask で返すので、人数や検出失敗に依らず確実に全員のシルエットが出る
+const SEG_MODEL_URL   = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_segmenter/float16/latest/selfie_segmenter.tflite';
 
 import { Camera }   from './camera.js';
 import { Renderer } from './renderer.js';
@@ -43,11 +48,18 @@ const POSE_ALPHA = 0.6;
 const POSE_TTL   = 2;
 const KP_ENTRY        = 0.40, KP_EXIT        = 0.20;
 const KP_ENTRY_WRIST  = 0.50, KP_EXIT_WRIST  = 0.25;
-const KP_ENTRY_FINGER = 0.30, KP_EXIT_FINGER = 0.15; // 指は MediaPipe でも視認性が落ちやすい
+const KP_ENTRY_FINGER = 0.30, KP_EXIT_FINGER = 0.15;
 const KP_ENTRY_LEG    = 0.30, KP_EXIT_LEG    = 0.15;
 
-const poseState = { kp: {}, frame: 0 };
-function resetPoseState() { poseState.kp = {}; }
+// 複数人対応: 各ポーズインデックス毎に独立した平滑化状態を持つ
+const MAX_POSES = 4;
+const poseState = {
+  kps: Array.from({ length: MAX_POSES }, () => ({})),
+  frame: 0,
+};
+function resetPoseState() {
+  for (let i = 0; i < MAX_POSES; i++) poseState.kps[i] = {};
+}
 
 // --- UI controls ---
 const ctrlFg     = document.getElementById('ctrl-fg');
@@ -101,33 +113,41 @@ const MAX_LEG_SEGS   = 6;
 const MAX_NONLEG_PTS = 8;
 const MAX_HAND_BS    = 3;
 
-function emptyPose() {
+// 複数人ポーズ用の flat 配列構造を作る
+function emptyPoses() {
   return {
-    headPos: [0, 0], headR: 0,
-    handLA:  [0, 0], handLBs: new Float32Array(MAX_HAND_BS * 2), handLBCount: 0, handLR: 0,
-    handRA:  [0, 0], handRBs: new Float32Array(MAX_HAND_BS * 2), handRBCount: 0, handRR: 0,
-    legSegA: new Float32Array(MAX_LEG_SEGS   * 2),
-    legSegB: new Float32Array(MAX_LEG_SEGS   * 2),
-    nonLegPts: new Float32Array(MAX_NONLEG_PTS * 2),
-    legSegCount: 0, nonLegCount: 0, legOn: 0,
+    poseCount: 0,
+    headPos:    new Float32Array(MAX_POSES * 2),
+    headR:      new Float32Array(MAX_POSES),
+    handLA:     new Float32Array(MAX_POSES * 2),
+    handLBs:    new Float32Array(MAX_POSES * MAX_HAND_BS * 2),
+    handLBCount:new Int32Array  (MAX_POSES),
+    handLR:     new Float32Array(MAX_POSES),
+    handRA:     new Float32Array(MAX_POSES * 2),
+    handRBs:    new Float32Array(MAX_POSES * MAX_HAND_BS * 2),
+    handRBCount:new Int32Array  (MAX_POSES),
+    handRR:     new Float32Array(MAX_POSES),
+    legSegA:    new Float32Array(MAX_POSES * MAX_LEG_SEGS * 2),
+    legSegB:    new Float32Array(MAX_POSES * MAX_LEG_SEGS * 2),
+    legSegCount:new Int32Array  (MAX_POSES),
+    nonLegPts:  new Float32Array(MAX_POSES * MAX_NONLEG_PTS * 2),
+    nonLegCount:new Int32Array  (MAX_POSES),
+    legOn:      new Int32Array  (MAX_POSES),
+    legRadius:  new Float32Array(MAX_POSES),
   };
 }
 
-// MediaPipe Pose のランドマーク(normalized [0,1])から色領域用のキーポイントを構築
-function buildPose(landmarks, camW, camH) {
-  poseState.frame++;
-  const out = emptyPose();
-  const frame = poseState.frame;
-  const arr = (landmarks && landmarks.length > 0) ? landmarks : [];
+// 1 人分のランドマークを ポーズインデックス pi の位置に書き込む
+function buildOnePose(out, pi, landmarks, camW, camH) {
+  const kpState = poseState.kps[pi];
+  const frame   = poseState.frame;
+  const arr     = landmarks || [];
 
-  // sm: 平滑化＋採否ヒステリシス＋TTL
-  //   - 値は EMA(α=0.6)で平滑化
-  //   - visibility が entry を超えたら有効化、exit を下回るまで継続
-  //   - 短期 (TTL) の検出落ちは前回位置で持続 → 明滅を抑制
+  // sm: ポーズごとに独立した平滑化＋採否ヒステリシス＋TTL
   const sm = (i, entry = KP_ENTRY, exit = KP_EXIT) => {
     const lm = arr[i];
     const vis = lm ? (lm.visibility ?? 1) : 0;
-    const prev = poseState.kp[i];
+    const prev = kpState[i];
     const wasValid = !!prev && (frame - prev.lastValid) <= POSE_TTL;
     const thresh = wasValid ? exit : entry;
     if (lm && vis >= thresh) {
@@ -136,12 +156,12 @@ function buildPose(landmarks, camW, camH) {
         ? [POSE_ALPHA * raw[0] + (1 - POSE_ALPHA) * prev.pos[0],
            POSE_ALPHA * raw[1] + (1 - POSE_ALPHA) * prev.pos[1]]
         : raw;
-      poseState.kp[i] = { pos: smoothed, lastValid: frame };
+      kpState[i] = { pos: smoothed, lastValid: frame };
       return smoothed;
     } else if (wasValid) {
       return prev.pos;
     } else {
-      delete poseState.kp[i];
+      delete kpState[i];
       return null;
     }
   };
@@ -161,7 +181,6 @@ function buildPose(landmarks, camW, camH) {
   const leftThumb  = sm(MP.leftThumb,  KP_ENTRY_FINGER, KP_EXIT_FINGER);
   const rightThumb = sm(MP.rightThumb, KP_ENTRY_FINGER, KP_EXIT_FINGER);
 
-  // 脚関連: Voronoi 判定用の骨格 polyline 点と、対立する非脚キーポイント
   const leftHip      = sm(MP.leftHip,      KP_ENTRY_LEG, KP_EXIT_LEG);
   const rightHip     = sm(MP.rightHip,     KP_ENTRY_LEG, KP_EXIT_LEG);
   const leftKnee     = sm(MP.leftKnee,     KP_ENTRY_LEG, KP_EXIT_LEG);
@@ -178,51 +197,40 @@ function buildPose(landmarks, camW, camH) {
     ? dist(leftShoulder, rightShoulder)
     : 150;
 
-  // 頭: 耳中点 → 半径は耳間距離 × 1.05（頭頂〜あごをカバー）
+  // 頭
   if (leftEar && rightEar) {
-    out.headPos = [(leftEar[0] + rightEar[0]) / 2, (leftEar[1] + rightEar[1]) / 2];
-    out.headR   = dist(leftEar, rightEar) * 1.05;
+    out.headPos[pi*2]   = (leftEar[0] + rightEar[0]) / 2;
+    out.headPos[pi*2+1] = (leftEar[1] + rightEar[1]) / 2;
+    out.headR[pi] = dist(leftEar, rightEar) * 1.05;
   } else if (nose) {
-    out.headPos = nose;
-    out.headR   = bodyScale * 0.55;
+    out.headPos[pi*2]   = nose[0];
+    out.headPos[pi*2+1] = nose[1];
+    out.headR[pi] = bodyScale * 0.55;
   }
 
-  // 手首から先: 手首(A) から 親指/人差し指/小指 への複数キャプセルの和集合
-  //   開いた手の横スプレッドを単一キャプセルでは radius が足りずカバー漏れする問題に対処
-  //   検出された指だけキャプセルを伸ばす (見えてない指はスキップ)
-  //   指が 1 本も検出されない場合は手首位置の縮退キャプセル(=円)にフォールバック
+  // 手 (multi-capsule)
   const handRadius = Math.max(bodyScale * 0.25, 28);
-
-  const fillHandBs = (Bs, target) => {
+  const writeHand = (A, Bs, baseA, baseBs, countArr, rArr) => {
+    if (!A) return;
+    out[baseA][pi*2]   = A[0];
+    out[baseA][pi*2+1] = A[1];
     const detected = Bs.filter(p => p !== null);
-    return detected.length > 0 ? detected : [target]; // 縮退時は wrist 位置で円
+    const real = detected.length > 0 ? detected : [A];
+    const count = Math.min(real.length, MAX_HAND_BS);
+    const base = pi * MAX_HAND_BS * 2;
+    for (let i = 0; i < count; i++) {
+      out[baseBs][base + i*2]   = real[i][0];
+      out[baseBs][base + i*2+1] = real[i][1];
+    }
+    out[countArr][pi] = count;
+    out[rArr][pi] = handRadius;
   };
+  writeHand(leftWrist,  [leftThumb,  leftIndex,  leftPinky],
+            'handLA', 'handLBs', 'handLBCount', 'handLR');
+  writeHand(rightWrist, [rightThumb, rightIndex, rightPinky],
+            'handRA', 'handRBs', 'handRBCount', 'handRR');
 
-  if (leftWrist) {
-    out.handLA = leftWrist;
-    const Bs = fillHandBs([leftThumb, leftIndex, leftPinky], leftWrist);
-    const count = Math.min(Bs.length, MAX_HAND_BS);
-    for (let i = 0; i < count; i++) {
-      out.handLBs[i * 2]     = Bs[i][0];
-      out.handLBs[i * 2 + 1] = Bs[i][1];
-    }
-    out.handLBCount = count;
-    out.handLR = handRadius;
-  }
-  if (rightWrist) {
-    out.handRA = rightWrist;
-    const Bs = fillHandBs([rightThumb, rightIndex, rightPinky], rightWrist);
-    const count = Math.min(Bs.length, MAX_HAND_BS);
-    for (let i = 0; i < count; i++) {
-      out.handRBs[i * 2]     = Bs[i][0];
-      out.handRBs[i * 2 + 1] = Bs[i][1];
-    }
-    out.handRBCount = count;
-    out.handRR = handRadius;
-  }
-
-  // 脚骨格 polyline: hip→knee→ankle→foot を各脚で線分に分解
-  // 端点のいずれかが欠けたセグメントはスキップ
+  // 脚 polyline
   const segs = [];
   const addSeg = (a, b) => { if (a && b) segs.push([a, b]); };
   addSeg(leftHip,    leftKnee);
@@ -232,29 +240,44 @@ function buildPose(landmarks, camW, camH) {
   addSeg(rightKnee,  rightAnkle);
   addSeg(rightAnkle, rightFootIdx);
   const segCount = Math.min(segs.length, MAX_LEG_SEGS);
+  const legBase = pi * MAX_LEG_SEGS * 2;
   for (let i = 0; i < segCount; i++) {
-    out.legSegA[i*2]   = segs[i][0][0];
-    out.legSegA[i*2+1] = segs[i][0][1];
-    out.legSegB[i*2]   = segs[i][1][0];
-    out.legSegB[i*2+1] = segs[i][1][1];
+    out.legSegA[legBase + i*2]   = segs[i][0][0];
+    out.legSegA[legBase + i*2+1] = segs[i][0][1];
+    out.legSegB[legBase + i*2]   = segs[i][1][0];
+    out.legSegB[legBase + i*2+1] = segs[i][1][1];
   }
-  out.legSegCount = segCount;
+  out.legSegCount[pi] = segCount;
 
-  // 非脚キーポイント (Voronoi 対立点): 肩・肘・手首・股関節
-  //   股関節を含めることで腰より上の領域 (胴体/腕) を「非脚側に近い」と判定させる
+  // 非脚キーポイント (Voronoi 対立点)
   const nonLeg = [];
   for (const k of [leftShoulder, rightShoulder, leftElbow, rightElbow,
                    leftWrist,    rightWrist,    leftHip,   rightHip]) {
     if (k) nonLeg.push(k);
   }
   const nonLegCount = Math.min(nonLeg.length, MAX_NONLEG_PTS);
+  const nonLegBase = pi * MAX_NONLEG_PTS * 2;
   for (let i = 0; i < nonLegCount; i++) {
-    out.nonLegPts[i*2]   = nonLeg[i][0];
-    out.nonLegPts[i*2+1] = nonLeg[i][1];
+    out.nonLegPts[nonLegBase + i*2]   = nonLeg[i][0];
+    out.nonLegPts[nonLegBase + i*2+1] = nonLeg[i][1];
   }
-  out.nonLegCount = nonLegCount;
-  out.legOn = segCount > 0 ? 1 : 0;
+  out.nonLegCount[pi] = nonLegCount;
+  out.legOn[pi]       = segCount > 0 ? 1 : 0;
+  // 絶対距離ガード: 他の人の脚骨格が遠くから誤マッチしないよう、
+  // bodyScale * 0.5 ≒ 半身分の距離を上限にする
+  out.legRadius[pi]   = Math.max(bodyScale * 0.5, 60);
+}
 
+// すべてのポーズを処理して flat 配列を返す
+function buildPoses(allLandmarks, camW, camH) {
+  poseState.frame++;
+  const out = emptyPoses();
+  const list = allLandmarks || [];
+  const n = Math.min(list.length, MAX_POSES);
+  for (let pi = 0; pi < n; pi++) {
+    buildOnePose(out, pi, list[pi], camW, camH);
+  }
+  out.poseCount = n;
   return out;
 }
 
@@ -335,12 +358,13 @@ async function main() {
   await populateCameras();
   navigator.mediaDevices.addEventListener('devicechange', populateCameras);
 
-  // --- MediaPipe Pose Landmarker のロード ---
+  // --- MediaPipe のロード ---
   statusEl.textContent = 'MediaPipe を読み込み中...';
-  let PoseLandmarker, FilesetResolver;
+  let PoseLandmarker, ImageSegmenter, FilesetResolver;
   try {
     const m = await import(MEDIAPIPE_BASE + '/vision_bundle.mjs');
-    PoseLandmarker = m.PoseLandmarker;
+    PoseLandmarker  = m.PoseLandmarker;
+    ImageSegmenter  = m.ImageSegmenter;
     FilesetResolver = m.FilesetResolver;
   } catch (e) {
     statusEl.textContent = 'MediaPipe 読み込み失敗: ' + e.message;
@@ -348,25 +372,48 @@ async function main() {
   }
 
   const vision = await FilesetResolver.forVisionTasks(MEDIAPIPE_BASE + '/wasm');
+
+  // PoseLandmarker: キーポイント検出専用 (segmentation は使わない)
   let poseLandmarker;
-  const baseConfig = {
+  const poseConfig = {
     runningMode: 'VIDEO',
-    numPoses: 1,
-    minPoseDetectionConfidence: 0.5,
-    minPosePresenceConfidence:  0.5,
-    minTrackingConfidence:      0.5,
-    outputSegmentationMasks: true,
+    numPoses: MAX_POSES,
+    // 多人数検出のため閾値を下げる
+    minPoseDetectionConfidence: 0.3,
+    minPosePresenceConfidence:  0.3,
+    minTrackingConfidence:      0.3,
+    outputSegmentationMasks: false, // ImageSegmenter に任せる
   };
   try {
     poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate: 'GPU' },
-      ...baseConfig,
+      ...poseConfig,
     });
   } catch (e) {
-    console.warn('GPU 推論不可、CPU にフォールバック:', e);
+    console.warn('Pose: GPU 推論不可、CPU にフォールバック:', e);
     poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
       baseOptions: { modelAssetPath: POSE_MODEL_URL, delegate: 'CPU' },
-      ...baseConfig,
+      ...poseConfig,
+    });
+  }
+
+  // ImageSegmenter: シルエット専用 (画像全体で人 vs 背景の 1 マスク = 多人数 OK)
+  let imageSegmenter;
+  const segConfig = {
+    runningMode: 'VIDEO',
+    outputCategoryMask: false,
+    outputConfidenceMasks: true,
+  };
+  try {
+    imageSegmenter = await ImageSegmenter.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: SEG_MODEL_URL, delegate: 'GPU' },
+      ...segConfig,
+    });
+  } catch (e) {
+    console.warn('Segmenter: GPU 推論不可、CPU にフォールバック:', e);
+    imageSegmenter = await ImageSegmenter.createFromOptions(vision, {
+      baseOptions: { modelAssetPath: SEG_MODEL_URL, delegate: 'CPU' },
+      ...segConfig,
     });
   }
 
@@ -383,12 +430,16 @@ async function main() {
         if (ts <= lastTs) ts = lastTs + 1; // VIDEO モードは厳密に単調増加が必要
         lastTs = ts;
 
-        const result = poseLandmarker.detectForVideo(camera.element, ts);
+        // --- 2 系統の推論を並走 ---
+        // 1) ImageSegmenter: 画像全体 → 単一の人マスク (多人数も 1 つにまとまる)
+        // 2) PoseLandmarker: 最大 MAX_POSES 人分のキーポイント
+        const segResult  = imageSegmenter.segmentForVideo(camera.element, ts);
+        const poseResult = poseLandmarker.detectForVideo(camera.element, ts);
 
-        // セグメンテーションマスク処理（体シルエット）
-        const masks = result.segmentationMasks;
-        if (masks && masks.length > 0) {
-          const mask = masks[0];
+        // セグメンテーション処理: confidenceMasks[0] が「前景(人)」の信頼度マスク
+        const segMasks = segResult.confidenceMasks;
+        if (segMasks && segMasks.length > 0) {
+          const mask = segMasks[0];
           const data = mask.getAsFloat32Array();
           const w = mask.width, h = mask.height;
           const N = data.length;
@@ -424,10 +475,8 @@ async function main() {
           mask.close();
         }
 
-        // ポーズランドマークから色領域を構築
-        const lms = (result.landmarks && result.landmarks.length > 0)
-          ? result.landmarks[0] : null;
-        const pose = buildPose(lms, camera.width, camera.height);
+        // 全員分のポーズランドマークから色領域を構築
+        const pose = buildPoses(poseResult.landmarks, camera.width, camera.height);
 
         renderer.render(maskCanvas, {
           closeRadius: CLOSE_RADIUS,
