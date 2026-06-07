@@ -26,14 +26,15 @@ const fpsEl    = document.getElementById('fps');
 //   よって残像を消すには FALL を大きく。肩が欠けるのは別問題(セグメンテーション品質)
 //   なので INFERENCE_CONFIG 側で対処する。
 const ALPHA_RISE = 0.5;
-const ALPHA_FALL = 0.6;
+const ALPHA_FALL = 0.85;
 
 const INFERENCE_CONFIG = {
   flipHorizontal:        false,
-  // 肩や輪郭の端まで拾うには 'low'+0.7 は痩せすぎ。'medium'+0.5 で
-  //   シルエットを太らせ、肩が欠けないようにする（多少 FPS は下がる）。
-  internalResolution:    'medium',
-  segmentationThreshold: 0.5,
+  // 肩や腕(肘)など細い部位まで拾うため痩せすぎないよう設定。
+  //   internalResolution を上げると細い腕の解像度が上がり、しきい値を下げると
+  //   確信度の低い端の画素も人物として残る（肘が欠けにくくなる / 多少 FPS は下がる）。
+  internalResolution:    'high',
+  segmentationThreshold: 0.4,
 };
 
 // --- UI controls ---

@@ -45,8 +45,8 @@ void main() {
   }
   bodyCov /= 9.0;
 
-  // 体は気持ち低めのしきい値で拾う（肩や輪郭の端セルを残すため）
-  fragColor = bodyCov < 0.4 ? u_bg : u_fg;
+  // 低めのしきい値で拾う（セル幅より細い腕や肘の端セルを消さないため）
+  fragColor = bodyCov < 0.28 ? u_bg : u_fg;
 }`;
 
 export class Renderer {
