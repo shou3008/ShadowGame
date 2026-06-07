@@ -1,7 +1,7 @@
-// BodyPix の segmentMultiPersonParts を使う直接セグメンテーション方式
-//   - 複数人検出をモデルがネイティブに行うので、シルエットも人数を問わず正しく出る
-//   - 各画素に部位 ID が割り当てられるため、キーポイント→幾何学計算の中間処理が不要
-//   - 結果(セグメント)をそのまま色に変換するだけ
+// BodyPix の segmentPerson を使うシンプルなシルエット方式
+//   - 検出した人の画素を 1、それ以外を 0 とする二値マスクを取得し、
+//     そのまま影(前景色)として描画するだけ。
+//   - 頭/手などの部位判定は行わない（必要になったら別途追加する）。
 const bodyPix = window['body-pix'];
 
 import { Camera }   from './camera.js';
@@ -12,42 +12,33 @@ const canvas   = document.getElementById('canvas');
 const statusEl = document.getElementById('status');
 const fpsEl    = document.getElementById('fps');
 
-// BodyPix の部位 ID 区分（COCO 24 部位）
-//   HEAD: face 左右 (= 0,1) — BodyPix に「頭部」カテゴリは無く face で代替
-//   HAND: hand 左右 (= 10,11)
-//   LEG : upper_leg + lower_leg + feet (= 14..21) すべて
-const HEAD_PARTS = new Set([0, 1]);
-const HAND_PARTS = new Set([10, 11]);
-const LEG_PARTS  = new Set([14, 15, 16, 17, 18, 19, 20, 21]);
-
-// 部位 → カテゴリ ID (大きい数値が「優先」)
-//   0=背景, 4=他の体, 3=脚, 2=手, 1=頭
-// 複数人で同一画素を別カテゴリで claim した場合は max を取る (= 高優先が勝つ)
-// ただし shader 側の塗り優先は別途 (hand > head > leg > body) なので、ここでは
-// シンプルに「どのカテゴリに該当するか」を 1 段で記録する
-const CAT_BG=0, CAT_HEAD=1, CAT_HAND=2, CAT_LEG=3, CAT_BODY=4;
-
-// 時間平滑化 + ヒステリシス（端の点滅対策）
-const EMA_ALPHA = 0.5;
-const HYST_HIGH = 0.7;
-const HYST_LOW  = 0.3;
+// 時間平滑化 (非対称 EMA)
+//   各画素のカテゴリ所属度を 0..1 の連続値として平滑化し、二値化せずにそのまま
+//   描画側へ渡す。こうすると「動いていない画素」は値がほぼ一定 → ちらつかず、
+//   「動いた画素」だけが滑らかに値を変えて追従する。
+//   立ち上がり(出現)は速く、立ち下がり(消失)は遅くする「粘る」挙動にすることで、
+//   セグメンテーションが時々しか拾わない弱い画素(肩や輪郭の端)が
+//   しきい値割れで消えてしまうのを防ぐ。
+//     ALPHA_RISE … 0→1 方向の追従速度（速め＝すぐ埋まる）
+//     ALPHA_FALL … 1→0 方向の追従速度（速め＝動いた跡をすぐ消す＝残像を出さない）
+//   FALL は curr=0(=その画素に人がいない)になった画素にしか効かない。
+//   毎フレーム検出され続ける肩などは curr=1 のままなので FALL を速くしても消えない。
+//   よって残像を消すには FALL を大きく。肩が欠けるのは別問題(セグメンテーション品質)
+//   なので INFERENCE_CONFIG 側で対処する。
+const ALPHA_RISE = 0.5;
+const ALPHA_FALL = 0.6;
 
 const INFERENCE_CONFIG = {
   flipHorizontal:        false,
+  // 肩や輪郭の端まで拾うには 'low'+0.7 は痩せすぎ。'medium'+0.5 で
+  //   シルエットを太らせ、肩が欠けないようにする（多少 FPS は下がる）。
   internalResolution:    'medium',
-  segmentationThreshold: 0.7,
-  // 多人数検出のためのポーズ検出パラメタ
-  maxDetections:    5,
-  scoreThreshold:   0.3,
-  nmsRadius:        20,
+  segmentationThreshold: 0.5,
 };
 
 // --- UI controls ---
 const ctrlFg     = document.getElementById('ctrl-fg');
 const ctrlBg     = document.getElementById('ctrl-bg');
-const ctrlHand   = document.getElementById('ctrl-hand');
-const ctrlHead   = document.getElementById('ctrl-head');
-const ctrlLeg    = document.getElementById('ctrl-leg');
 const ctrlScale  = document.getElementById('ctrl-scale');
 const ctrlScaleVal = document.getElementById('ctrl-scale-val');
 const ctrlFlip   = document.getElementById('ctrl-flip');
@@ -67,9 +58,6 @@ function hexToVec4(hex) {
 const config = {
   fgColor:    hexToVec4(ctrlFg.value),
   bgColor:    hexToVec4(ctrlBg.value),
-  handColor:  hexToVec4(ctrlHand.value),
-  headColor:  hexToVec4(ctrlHead.value),
-  legColor:   hexToVec4(ctrlLeg.value),
   pixelScale: 1.0,
   mirror:     ctrlFlip.checked,
   cellSize:   parseInt(ctrlCell.value),
@@ -77,9 +65,6 @@ const config = {
 
 ctrlFg.addEventListener('input',   () => { config.fgColor   = hexToVec4(ctrlFg.value); });
 ctrlBg.addEventListener('input',   () => { config.bgColor   = hexToVec4(ctrlBg.value); });
-ctrlHand.addEventListener('input', () => { config.handColor = hexToVec4(ctrlHand.value); });
-ctrlHead.addEventListener('input', () => { config.headColor = hexToVec4(ctrlHead.value); });
-ctrlLeg.addEventListener('input',  () => { config.legColor  = hexToVec4(ctrlLeg.value); });
 ctrlFlip.addEventListener('change', () => { config.mirror = ctrlFlip.checked; });
 ctrlScale.addEventListener('input', () => {
   config.pixelScale = parseInt(ctrlScale.value) / 100;
@@ -89,21 +74,10 @@ ctrlCell.addEventListener('input', () => {
   ctrlCellVal.textContent = ctrlCell.value + 'px';
 });
 
-// 部位 ID → カテゴリ
-function partToCat(part) {
-  if (part < 0)              return CAT_BG;
-  if (HEAD_PARTS.has(part))  return CAT_HEAD;
-  if (HAND_PARTS.has(part))  return CAT_HAND;
-  if (LEG_PARTS .has(part))  return CAT_LEG;
-  return CAT_BODY;
-}
-
-// 一画素分の EMA + ヒステリシス を smoothedArr/binaryArr に反映
-function emaHyst(smoothedArr, binaryArr, i, currVal) {
-  const s = EMA_ALPHA * currVal + (1 - EMA_ALPHA) * smoothedArr[i];
-  smoothedArr[i] = s;
-  if (binaryArr[i]) { if (s < HYST_LOW)  binaryArr[i] = 0; }
-  else              { if (s > HYST_HIGH) binaryArr[i] = 1; }
+// 一画素分の非対称 EMA（出現は速く、消失は速く＝残像を残さない）
+function ema(arr, i, curr) {
+  const a = curr > arr[i] ? ALPHA_RISE : ALPHA_FALL;
+  arr[i] += a * (curr - arr[i]);
 }
 
 // --- Main ---
@@ -130,19 +104,17 @@ async function main() {
   ctrlScale.addEventListener('input', fitCanvas);
 
   // --- マスク状態 ---
-  // RGBA に 4 カテゴリ × 二値を詰める: R=head, G=hand, B=leg, A=body
+  // RGBA の A チャンネルに 体の所属度(連続 0..255) を詰める (R/G/B は未使用)
   const maskCanvas = document.createElement('canvas');
   const maskCtx    = maskCanvas.getContext('2d', { willReadFrequently: false });
-  let smHead = null, smHand = null, smLeg = null, smBody = null; // Float32 EMA
-  let bnHead = null, bnHand = null, bnLeg = null, bnBody = null; // Uint8 binary
-  let buf    = null;                                              // RGBA 書き出しバッファ
+  let smBody = null; // Float32 EMA (0..1)
+  let buf    = null; // RGBA 書き出しバッファ
   let paused = false;
 
   function syncMaskSize() {
     maskCanvas.width  = camera.width;
     maskCanvas.height = camera.height;
-    smHead = smHand = smLeg = smBody = null;
-    bnHead = bnHand = bnLeg = bnBody = null;
+    smBody = null;
     buf    = null;
   }
   syncMaskSize();
@@ -202,67 +174,30 @@ async function main() {
     if (camera.ready && !processing && !paused) {
       processing = true;
 
-      // 多人数の部位セグメンテーション
-      //   返り値: PersonSegmentation[] — 各人 1 つの { data: Int32Array, width, height, pose }
-      //   data[i] は その人 が claim する画素の部位 ID。claim していない画素は -1
-      net.segmentMultiPersonParts(camera.element, INFERENCE_CONFIG).then(segs => {
-        if (segs && segs.length > 0) {
-          const w = segs[0].width, h = segs[0].height;
+      // 人物セグメンテーション (全員分を 1 枚の二値マスクに統合)
+      //   返り値: SemanticPersonSegmentation — { data: Uint8Array, width, height, allPoses }
+      //   data[i] は その画素が人なら 1、そうでなければ 0
+      net.segmentPerson(camera.element, INFERENCE_CONFIG).then(seg => {
+        if (seg && seg.data) {
+          const w = seg.width, h = seg.height;
           const N = w * h;
+          const data = seg.data;
 
-          if (!smHead || smHead.length !== N) {
-            smHead = new Float32Array(N); smHand = new Float32Array(N);
-            smLeg  = new Float32Array(N); smBody = new Float32Array(N);
-            bnHead = new Uint8Array  (N); bnHand = new Uint8Array  (N);
-            bnLeg  = new Uint8Array  (N); bnBody = new Uint8Array  (N);
+          if (!smBody || smBody.length !== N) {
+            smBody = new Float32Array(N);
             buf    = new Uint8ClampedArray(N * 4);
           }
 
-          // 各画素ごとに全員分の部位 ID を走査して カテゴリ を決定
-          // 同画素を複数人が claim することは原則無いが、念のため最大優先カテゴリを採用
+          // EMA(連続) → RGBA 書き出し。二値化せず連続値のまま渡すので、
+          // 動かない画素は値が一定でちらつかず、動いた画素だけが滑らかに追従する。
           for (let i = 0; i < N; i++) {
-            let cat = CAT_BG;
-            for (let pi = 0; pi < segs.length; pi++) {
-              const c = partToCat(segs[pi].data[i]);
-              if (c !== CAT_BG && (cat === CAT_BG || c < cat)) cat = c;
-              // 上の条件: BG 以外で、より高優先 (HEAD=1 / HAND=2 / LEG=3 / BODY=4 の中で
-              //           小さい番号 = 体表面側に近い識別、HEAD > HAND > LEG > BODY と扱う)
-              // ※ shader 側の塗り優先 (hand > head > leg > body) とは別。
-              //    ここでは「何のセグメントだったか」だけ確定させる
-            }
-            // 各カテゴリ二値の今フレーム値
-            const cHead = cat === CAT_HEAD ? 1 : 0;
-            const cHand = cat === CAT_HAND ? 1 : 0;
-            const cLeg  = cat === CAT_LEG  ? 1 : 0;
-            const cBody = cat !== CAT_BG   ? 1 : 0;
-
-            emaHyst(smHead, bnHead, i, cHead);
-            emaHyst(smHand, bnHand, i, cHand);
-            emaHyst(smLeg,  bnLeg,  i, cLeg );
-            emaHyst(smBody, bnBody, i, cBody);
-          }
-
-          // RGBA バッファに 4 カテゴリ二値を詰める
-          for (let i = 0; i < N; i++) {
-            buf[i * 4 + 0] = bnHead[i] ? 255 : 0; // R = head
-            buf[i * 4 + 1] = bnHand[i] ? 255 : 0; // G = hand
-            buf[i * 4 + 2] = bnLeg [i] ? 255 : 0; // B = leg
-            buf[i * 4 + 3] = bnBody[i] ? 255 : 0; // A = body
+            ema(smBody, i, data[i] ? 1 : 0);
+            buf[i * 4 + 3] = smBody[i] * 255; // A = body 所属度 (R/G/B は 0)
           }
           if (maskCanvas.width !== w || maskCanvas.height !== h) {
             maskCanvas.width = w; maskCanvas.height = h;
           }
           maskCtx.putImageData(new ImageData(buf, w, h), 0, 0);
-        } else {
-          // 検出 0 人: マスクをクリア
-          if (buf) buf.fill(0);
-          if (smBody) { smBody.fill(0); bnBody.fill(0); }
-          if (smHead) { smHead.fill(0); bnHead.fill(0); }
-          if (smHand) { smHand.fill(0); bnHand.fill(0); }
-          if (smLeg ) { smLeg .fill(0); bnLeg .fill(0); }
-          if (buf) {
-            maskCtx.putImageData(new ImageData(buf, maskCanvas.width, maskCanvas.height), 0, 0);
-          }
         }
 
         renderer.render(maskCanvas, {

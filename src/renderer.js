@@ -1,8 +1,8 @@
 // シンプル化したレンダラ:
-//   - BodyPix の segmentMultiPersonParts を JS 側で 4 カテゴリ二値 (R=head, G=hand,
-//     B=leg, A=body) に圧縮してから渡す
+//   - BodyPix の人物マスクを JS 側で 体の所属度の連続値 (A チャンネル, 0..255)
+//     に圧縮してから渡す
 //   - シェーダは 1 パスのみ。クロージング系の前処理は無し
-//     (時間平滑化・ヒステリシスは JS 側で、空間平滑化はセル内 3x3 平均で吸収)
+//     (時間平滑化は JS 側 EMA で、空間平滑化はセル内 3x3 平均で吸収)
 
 const VERT = `#version 300 es
 layout(location=0) in vec2 a_pos;
@@ -17,11 +17,10 @@ void main() {
   v_uv = vec2(u, v);
 }`;
 
-// グリッドモザイク + カテゴリ別塗色
-//   u_tex: RGBA 入力。R=head 二値, G=hand 二値, B=leg 二値, A=body 二値
-//   - 体カバレッジは alpha を 3x3 平均で取って閾値判定 (端セルの揺らぎを抑制)
-//   - 各カテゴリは cell 中心の 1 サンプルで判定
-//   - 塗色優先: hand > head > leg > body
+// グリッドモザイク (シルエットのみ)
+//   u_tex: RGBA 入力。A=body 所属度 (連続 0..1)
+//   - セル内 3x3 を平均してカバレッジを取得し閾値判定する。
+//     連続値を空間平均することで、セル単位のチカチカ(きもさ)を抑える。
 const MOSAIC_FRAG = `#version 300 es
 precision mediump float;
 uniform sampler2D u_tex;
@@ -29,9 +28,6 @@ uniform vec2  u_res;     // 出力解像度
 uniform float u_cell;    // セル一辺(px)
 uniform vec4  u_fg;
 uniform vec4  u_bg;
-uniform vec4  u_hand;
-uniform vec4  u_head;
-uniform vec4  u_leg;
 in vec2 v_uv;
 out vec4 fragColor;
 void main() {
@@ -39,7 +35,7 @@ void main() {
   vec2  cell   = floor(px / u_cell);
   vec2  center = (cell + 0.5) * u_cell;
 
-  // 体カバレッジ判定: alpha 3x3 平均
+  // セル内 3x3 平均で 体のカバレッジを取得
   float bodyCov = 0.0;
   for (int yy = -1; yy <= 1; yy++) {
     for (int xx = -1; xx <= 1; xx++) {
@@ -47,18 +43,10 @@ void main() {
       bodyCov += texture(u_tex, (center + off) / u_res).a;
     }
   }
-  if (bodyCov / 9.0 < 0.5) {
-    fragColor = u_bg;
-    return;
-  }
+  bodyCov /= 9.0;
 
-  // カテゴリ: cell 中心の 1 サンプル
-  vec4 cat = texture(u_tex, center / u_res);
-  vec4 col = u_fg;
-  if (cat.b > 0.5) col = u_leg;
-  if (cat.r > 0.5) col = u_head;
-  if (cat.g > 0.5) col = u_hand;
-  fragColor = col;
+  // 体は気持ち低めのしきい値で拾う（肩や輪郭の端セルを残すため）
+  fragColor = bodyCov < 0.4 ? u_bg : u_fg;
 }`;
 
 export class Renderer {
@@ -87,7 +75,7 @@ export class Renderer {
   }
 
   render(maskImage, {
-    fgColor, bgColor, handColor, headColor, legColor,
+    fgColor, bgColor,
     mirror = true, cellSize = 18,
   }) {
     const gl = this.#gl;
@@ -113,9 +101,6 @@ export class Renderer {
     gl.uniform1f(loc('u_cell'),  Math.max(2, cellSize));
     gl.uniform4fv(loc('u_fg'),   fgColor);
     gl.uniform4fv(loc('u_bg'),   bgColor);
-    gl.uniform4fv(loc('u_hand'), handColor);
-    gl.uniform4fv(loc('u_head'), headColor);
-    gl.uniform4fv(loc('u_leg'),  legColor);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }
