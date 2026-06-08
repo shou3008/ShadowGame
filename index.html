@@ -9,6 +9,12 @@
 <body>
   <div id="app">
     <canvas id="canvas"></canvas>
+    <canvas id="game"></canvas>
+    <div id="game-result" hidden>
+      <div class="result-title" id="result-title">CLEAR!</div>
+      <div class="result-time" id="result-time">--</div>
+      <div class="result-hint" id="result-hint">「スタート」でもう一度</div>
+    </div>
     <div id="ui">
       <div id="toolbar">
         <div class="tool-group">
@@ -33,6 +39,12 @@
           <input type="color" id="ctrl-fg" value="#000000">
           <label for="ctrl-bg">背景</label>
           <input type="color" id="ctrl-bg" value="#ffffff">
+        </div>
+        <div class="tool-group">
+          <button id="game-start" class="game-btn">スタート</button>
+          <button id="game-reset" class="game-btn">リセット</button>
+          <span id="game-timer">0.0s</span>
+          <span id="game-remain">残り --</span>
         </div>
         <div class="tool-group spacer">
           <span id="status">初期化中...</span>

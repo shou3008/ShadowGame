@@ -29,6 +29,57 @@ body {
   max-height: 100%;
 }
 
+/* ゲームオブジェクト用オーバーレイ (シルエット canvas に重ねる) */
+#game {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* クリア表示 */
+#game-result {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 8;
+  text-align: center;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 28px 56px;
+  border-radius: 16px;
+  border: 2px solid rgba(90, 240, 138, 0.7);
+}
+#game-result[hidden] { display: none; }
+.result-title {
+  font-size: 56px;
+  font-weight: 800;
+  color: #5af08a;
+  letter-spacing: 2px;
+}
+#game-result.gameover {
+  border-color: rgba(255, 90, 90, 0.8);
+}
+#game-result.gameover .result-title {
+  color: #ff6464;
+}
+.result-time { font-size: 32px; margin-top: 6px; color: #fff; }
+.result-hint { font-size: 14px; margin-top: 10px; color: #aaa; }
+
+.game-btn {
+  background: rgba(90, 240, 138, 0.18);
+  border: 1px solid rgba(90, 240, 138, 0.6);
+  color: #aef5c6;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.game-btn:hover { background: rgba(90, 240, 138, 0.35); }
+#game-timer { font-size: 14px; color: #5af08a; min-width: 52px; font-variant-numeric: tabular-nums; }
+#game-remain { font-size: 13px; color: #ccc; }
+
 #ui {
   position: absolute;
   top: 0;

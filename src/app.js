@@ -6,11 +6,23 @@ const bodyPix = window['body-pix'];
 
 import { Camera }   from './camera.js';
 import { Renderer } from './renderer.js';
+import { Game }     from './game.js';
 
 const video    = document.getElementById('video');
 const canvas   = document.getElementById('canvas');
+const gameCanvas = document.getElementById('game');
 const statusEl = document.getElementById('status');
 const fpsEl    = document.getElementById('fps');
+
+// --- ゲーム UI ---
+const gameStartBtn  = document.getElementById('game-start');
+const gameResetBtn  = document.getElementById('game-reset');
+const gameTimerEl   = document.getElementById('game-timer');
+const gameRemainEl  = document.getElementById('game-remain');
+const gameResultEl  = document.getElementById('game-result');
+const resultTitleEl = document.getElementById('result-title');
+const resultTimeEl  = document.getElementById('result-time');
+const resultHintEl  = document.getElementById('result-hint');
 
 // 時間平滑化 (非対称 EMA)
 //   各画素のカテゴリ所属度を 0..1 の連続値として平滑化し、二値化せずにそのまま
@@ -85,9 +97,11 @@ function ema(arr, i, curr) {
 async function main() {
   statusEl.textContent = 'カメラを起動中...';
   const camera = new Camera(video);
-  await camera.start({ width: 640, height: 480 });
+  // 16:9 ワイド(仮想ワールド 1920×1080 と同じアスペクト)で取得
+  await camera.start({ width: 1280, height: 720 });
 
   const renderer = new Renderer(canvas);
+  const game     = new Game(gameCanvas);
 
   function fitCanvas() {
     const aspect = camera.width / camera.height;
@@ -99,6 +113,14 @@ async function main() {
     const rh = Math.max(1, Math.round(dispH * config.pixelScale));
     renderer.resize(rw, rh);
     ctrlScaleVal.textContent = `${rw}×${rh}px`;
+
+    // ゲームオーバーレイをシルエット canvas にぴったり重ねる
+    gameCanvas.width  = dispW;
+    gameCanvas.height = dispH;
+    gameCanvas.style.width  = dispW + 'px';
+    gameCanvas.style.height = dispH + 'px';
+    gameCanvas.style.left = canvas.offsetLeft + 'px';
+    gameCanvas.style.top  = canvas.offsetTop  + 'px';
   }
   fitCanvas();
   window.addEventListener('resize', fitCanvas);
@@ -140,7 +162,7 @@ async function main() {
     paused = true;
     statusEl.textContent = 'カメラ切り替え中...';
     try {
-      await camera.start({ width: 640, height: 480, deviceId: id });
+      await camera.start({ width: 1280, height: 720, deviceId: id });
       syncMaskSize();
       fitCanvas();
       statusEl.textContent = '実行中';
@@ -169,9 +191,44 @@ async function main() {
 
   let frameCount  = 0;
   let lastFpsTime = performance.now();
+  let lastFrame   = performance.now();
   let processing  = false;
 
+  // --- ゲーム操作 ---
+  gameStartBtn.addEventListener('click', () => { game.start(); });
+  gameResetBtn.addEventListener('click', () => { game.reset(); });
+
+  function updateGameHud() {
+    gameTimerEl.textContent  = (game.timeMs / 1000).toFixed(1) + 's';
+    gameRemainEl.textContent = `STAGE ${game.stageIndex + 1}/${game.stageCount}`;
+
+    if (game.won) {
+      resultTitleEl.textContent = 'ALL CLEAR!';
+      resultTimeEl.textContent  = (game.timeMs / 1000).toFixed(1) + ' 秒';
+      resultHintEl.textContent  = '「スタート」でもう一度';
+      gameResultEl.classList.remove('gameover');
+      gameResultEl.hidden = false;
+    } else if (game.gameOver) {
+      resultTitleEl.textContent = 'GAME OVER';
+      resultTimeEl.textContent  = '落下！';
+      resultHintEl.textContent  = '「スタート」でこのステージから再挑戦';
+      gameResultEl.classList.add('gameover');
+      gameResultEl.hidden = false;
+    } else {
+      gameResultEl.hidden = true;
+    }
+  }
+
   function loop() {
+    // --- ゲームは推論レートに依存せず毎フレーム(60fps)更新・描画 ---
+    const tNow = performance.now();
+    const dtMs = tNow - lastFrame;
+    lastFrame = tNow;
+    game.mirror = config.mirror;
+    game.update(dtMs);
+    game.draw();
+    updateGameHud();
+
     if (camera.ready && !processing && !paused) {
       processing = true;
 
@@ -199,6 +256,9 @@ async function main() {
             maskCanvas.width = w; maskCanvas.height = h;
           }
           maskCtx.putImageData(new ImageData(buf, w, h), 0, 0);
+
+          // ゲームの当たり判定用に最新マスク(連続値 smBody)を渡す
+          game.setMask(smBody, w, h);
         }
 
         renderer.render(maskCanvas, {
