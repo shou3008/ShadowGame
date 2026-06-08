@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git add *)",
+      "Bash(git commit -m '@ *)",
+      "Bash(git commit --amend -m 'ゲーム実装: ステージ制ステージを追加' -m '- 協力プレイ用に移動ボール1個とゴールを持つステージを実装 *)"
+    ]
+  }
+}
