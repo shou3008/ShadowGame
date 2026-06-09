@@ -37,16 +37,19 @@ const resultHintEl  = document.getElementById('result-hint');
 //   毎フレーム検出され続ける肩などは curr=1 のままなので FALL を速くしても消えない。
 //   よって残像を消すには FALL を大きく。肩が欠けるのは別問題(セグメンテーション品質)
 //   なので INFERENCE_CONFIG 側で対処する。
-const ALPHA_RISE = 0.5;
+// RISE を速くすると、動いた手先などの「新しく現れた画素」がすぐ埋まり、
+//   高速移動でも手の先が途切れにくくなる（操作性向上）。
+const ALPHA_RISE = 0.75;
 const ALPHA_FALL = 0.85;
 
 const INFERENCE_CONFIG = {
   flipHorizontal:        false,
-  // 肩や腕(肘)など細い部位まで拾うため痩せすぎないよう設定。
-  //   internalResolution を上げると細い腕の解像度が上がり、しきい値を下げると
-  //   確信度の低い端の画素も人物として残る（肘が欠けにくくなる / 多少 FPS は下がる）。
-  internalResolution:    'high',
-  segmentationThreshold: 0.4,
+  // 描画はモザイク(粗いセル)に量子化されるため、マスクは過剰に高解像度でも
+  //   見た目はほぼ変わらない。そこで internalResolution は 'medium' に下げて
+  //   推論を軽くし、描画レート(=スムーズさ)を稼ぐ。見た目の精度は維持される。
+  //   手先・輪郭の途切れは segmentationThreshold を低く保つことで補う。
+  internalResolution:    'medium',
+  segmentationThreshold: 0.3,
 };
 
 // --- UI controls ---
@@ -180,6 +183,8 @@ async function main() {
 
   // --- BodyPix モデル ---
   statusEl.textContent = 'BodyPix を読み込み中...';
+  // multiplier を上げるとモデル容量が増え、斜め/非正面の姿勢や手先の認識が安定する。
+  //   さらに堅くしたい場合は architecture:'ResNet50'(高精度・重い) も選択肢。
   const net = await bodyPix.load({
     architecture: 'MobileNetV1',
     outputStride: 16,
