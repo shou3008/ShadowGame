@@ -12,7 +12,8 @@
       "Bash(cp src/camera.js /tmp/c.mjs)",
       "Bash(node --check /tmp/a.mjs)",
       "Bash(git restore *)",
-      "Bash(cd c:/Users/shoud/github/ShadowGame && cp src/app.js /tmp/a.mjs && node --check /tmp/a.mjs && echo OK)"
+      "Bash(cd c:/Users/shoud/github/ShadowGame && cp src/app.js /tmp/a.mjs && node --check /tmp/a.mjs && echo OK)",
+      "Bash(node --check /tmp/g.mjs)"
     ],
     "additionalDirectories": [
       "\\tmp"

@@ -49,7 +49,9 @@ const INFERENCE_CONFIG = {
   //   推論を軽くし、描画レート(=スムーズさ)を稼ぐ。見た目の精度は維持される。
   //   手先・輪郭の途切れは segmentationThreshold を低く保つことで補う。
   internalResolution:    'medium',
-  segmentationThreshold: 0.3,
+  // 白い服など「背景との差が小さく確信度が下がる」画素を拾えるよう低めに設定。
+  //   下げるほど欠けにくくなるが、背景ノイズも混ざりやすくなる(0.2〜0.3 が目安)。
+  segmentationThreshold: 0.2,
 };
 
 // --- UI controls ---
@@ -188,7 +190,9 @@ async function main() {
   const net = await bodyPix.load({
     architecture: 'MobileNetV1',
     outputStride: 16,
-    multiplier:   0.75,
+    // 白い服・斜めの姿勢などで認識が甘いときは容量を上げると安定する(0.75→1.0)。
+    //   さらに堅くしたいなら architecture:'ResNet50'(高精度・重い)。
+    multiplier:   1.0,
     quantBytes:   2,
   });
 
@@ -205,7 +209,9 @@ async function main() {
 
   function updateGameHud() {
     gameTimerEl.textContent  = (game.timeMs / 1000).toFixed(1) + 's';
-    gameRemainEl.textContent = `STAGE ${game.stageIndex + 1}/${game.stageCount}`;
+    const phaseLabel = game.phase === 'pose' ? '（構え中）'
+                     : game.phase === 'run'  ? '（実行中）' : '';
+    gameRemainEl.textContent = `STAGE ${game.stageIndex + 1}/${game.stageCount}${phaseLabel}`;
 
     if (game.won) {
       resultTitleEl.textContent = 'ALL CLEAR!';
@@ -216,7 +222,7 @@ async function main() {
     } else if (game.gameOver) {
       resultTitleEl.textContent = 'GAME OVER';
       resultTimeEl.textContent  = '落下！';
-      resultHintEl.textContent  = '「スタート」でこのステージから再挑戦';
+      resultHintEl.textContent  = '「スタート」で再挑戦（もう一度ポーズから）';
       gameResultEl.classList.add('gameover');
       gameResultEl.hidden = false;
     } else {
@@ -231,10 +237,20 @@ async function main() {
     lastFrame = tNow;
     game.mirror = config.mirror;
     game.update(dtMs);
+
+    // シルエットは毎フレーム描画する。maskCanvas は推論時のみ更新されるため、
+    //   実行(RUN)中は固定シルエットがそのまま再描画され、消えずに残る。
+    renderer.render(maskCanvas, {
+      camW: camera.width, camH: camera.height,
+      ...config,
+    });
+
     game.draw();
     updateGameHud();
 
-    if (camera.ready && !processing && !paused) {
+    // 推論はライブ表示が要るフェーズ(idle/構え)のみ実行。
+    //   実行(RUN)/結果中は固定したシルエットのまま＝推論を止めて軽く・スムーズにする。
+    if (game.live && camera.ready && !processing && !paused) {
       processing = true;
 
       // 人物セグメンテーション (全員分を 1 枚の二値マスクに統合)
@@ -265,11 +281,6 @@ async function main() {
           // ゲームの当たり判定用に最新マスク(連続値 smBody)を渡す
           game.setMask(smBody, w, h);
         }
-
-        renderer.render(maskCanvas, {
-          camW: camera.width, camH: camera.height,
-          ...config,
-        });
 
         processing = false;
       }).catch(err => {

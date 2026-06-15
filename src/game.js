@@ -1,86 +1,90 @@
-// 協力プレイのシャドウゲーム (ステージ制)
-//   - 人物シルエット(smBody マスク)を当たり判定の「壁/坂」として使う
-//   - ステージごとに扱える動作(ルール)が変わる:
-//       STAGE 1: 重力のみ。影を坂にしてボールを転がし運ぶ。落下で GAME OVER。
-//       STAGE 2: 段差マップあり。影で下から突き上げてジャンプし、段を登る。
+// 協力プレイのシャドウゲーム (ポーズ・キャプチャ方式)
+//   流れ: 構え(POSE) → キャプチャ(CAPTURE) → 実行(RUN)
+//     1. POSE : ライブのシルエットを見ながら、複数人で協力して「坂/橋」の形を作る
+//     2. CAPTURE: 一定タイミング(カウントダウン0)でその瞬間のシルエットを固定
+//     3. RUN  : ボールを落とし、"固定したシルエット" を当たり判定にしてゴールを目指す
+//   → 実行中は形を変えられないので、一人では届かない配置にすることで協力が必須になる。
 //
 // 座標系: 仮想ワールド 1920×1080 (16:9)。描画時にオーバーレイ canvas へスケール。
-//   当たり判定はワールド座標→正規化→マスク座標へ変換してサンプリングする。
 
 const WORLD_W = 1920;
 const WORLD_H = 1080;
 
 // ステージ非依存の物理定数
 const BALL_R      = 60;
-const AIR         = 0.999; // 空気抵抗(わずか)
+const AIR         = 0.999;
 const MAX_SPEED   = 5200;
-const MASK_THRESH = 0.5;   // この値以上を「影あり」とみなす
-const FLOOR_FRIC  = 0.94;  // 平面の上を転がるときの横方向減衰
-const PLAT_REST   = 0.18;  // プラットフォームの反発(低め=跳ねずに乗る)
+const MASK_THRESH = 0.5;
+const FLOOR_FRIC  = 0.94;
+const PLAT_REST   = 0.18;
 
-const BALL_COLORS = ['#ff5a5a', '#ffd23f', '#46d3ff', '#9b6bff'];
+const BALL_COLOR = '#ffd23f';
 
 // --- ステージ定義 (矩形・座標はすべて 0..1 の正規化値) ---
-//   gravity     : 重力加速度
-//   shadowPush  : 影に触れている間の外向き押し出し(0=能動的な弾き無し=坂のみ)
-//   shadowRest  : 影の反発(低い=坂に乗って滑る / 高い=弾む)
-//   fallGameOver: 画面下に落ちたら GAME OVER か
-//   platforms   : 静的な足場(矩形)
+//   poseMs    : 構え(キャプチャまで)の時間
+//   gravity   : 重力加速度
+//   shadowRest: 影(固定シルエット)の反発(低い=坂に乗って転がる)
+//   platforms : 固定の足場(スタート台/ゴール台など)
+//   スタート台(左上)とゴール台(右下)を大きく離し、間を人の橋で繋がせる。
 const STAGES = [
   {
-    name: 'STAGE 1 — 影の坂で運ぶ',
-    gravity: 2200, shadowPush: 0, shadowRest: 0.12, fallGameOver: true,
-    platforms: [],
-    ballStart: { x: 0.12, y: 0.10 },
-    goal:      { x: 0.85, y: 0.34, w: 0.12, h: 0.28 },
+    name: 'ステージ1 — 影で橋を作って渡せ',
+    poseMs: 6000, gravity: 2100, shadowRest: 0.10, fallGameOver: true,
+    platforms: [
+      { x: 0.00, y: 0.26, w: 0.13, h: 0.022 }, // スタート台(左上)
+      { x: 0.87, y: 0.78, w: 0.13, h: 0.022 }, // ゴール台(右下)
+    ],
+    ballStart: { x: 0.06, y: 0.21 },
+    goal:      { x: 0.87, y: 0.63, w: 0.13, h: 0.15 }, // ゴール台の上
   },
   {
-    name: 'STAGE 2 — 影でジャンプして登る',
-    gravity: 2800, shadowPush: 480, shadowRest: 0.25, fallGameOver: false,
+    name: 'ステージ2 — 谷をまたいで運べ',
+    poseMs: 7000, gravity: 2300, shadowRest: 0.10, fallGameOver: true,
     platforms: [
-      { x: 0.00, y: 0.945, w: 1.00, h: 0.055 }, // 地面
-      { x: 0.16, y: 0.80,  w: 0.17, h: 0.028 },
-      { x: 0.40, y: 0.66,  w: 0.17, h: 0.028 },
-      { x: 0.63, y: 0.52,  w: 0.17, h: 0.028 },
-      { x: 0.83, y: 0.38,  w: 0.17, h: 0.028 }, // 最上段
+      { x: 0.00, y: 0.20, w: 0.11, h: 0.022 }, // スタート台(左上・高い)
+      { x: 0.44, y: 0.52, w: 0.12, h: 0.022 }, // 中継台(中央)
+      { x: 0.89, y: 0.72, w: 0.11, h: 0.022 }, // ゴール台(右)
     ],
-    ballStart: { x: 0.05, y: 0.90 },
-    goal:      { x: 0.85, y: 0.27, w: 0.13, h: 0.10 }, // 最上段の上
+    ballStart: { x: 0.05, y: 0.15 },
+    goal:      { x: 0.89, y: 0.57, w: 0.11, h: 0.15 },
   },
 ];
 
 export class Game {
   #ctx;
   #stageIdx = 0;
-  #stage = null;     // ワールド座標に解決したステージ
+  #stage = null;        // ワールド座標に解決したステージ
   #ball = null;
-  #running = false;
-  #won = false;
-  #gameOver = false;
-  #timeMs = 0;
-  #flash = 0;        // ゴール時のフラッシュ
-  #banner = null;    // { text, t } 画面中央の一時表示
-  mirror = true;     // 表示の左右反転に合わせてマスクをサンプリング
 
-  #mask = null; #mw = 0; #mh = 0;
+  #phase = 'idle';      // 'idle' | 'pose' | 'run' | 'won' | 'gameover'
+  #poseTimer = 0;       // 構えの残り(ms)
+  #timeMs = 0;          // RUN の経過時間
+  #flash = 0;
+  #banner = null;       // { text, t }
+
+  mirror = true;        // 表示の左右反転に合わせてマスクをサンプリング
+
+  #mask = null; #mw = 0; #mh = 0;             // ライブのマスク(参照)
+  #cap = null; #cw = 0; #ch = 0; #cmir = true; // キャプチャした固定マスク(コピー)
 
   constructor(overlayCanvas) {
     this.#ctx = overlayCanvas.getContext('2d');
     this.reset();
   }
 
-  // --- 状態取得 (HUD 用) ---
-  get running()   { return this.#running; }
-  get won()       { return this.#won; }
-  get gameOver()  { return this.#gameOver; }
-  get timeMs()    { return this.#timeMs; }
-  get stageName() { return this.#stage ? this.#stage.name : ''; }
-  get stageIndex(){ return this.#stageIdx; }
-  get stageCount(){ return STAGES.length; }
+  // --- 状態取得 (HUD / ループ制御 用) ---
+  get phase()      { return this.#phase; }
+  get timeMs()     { return this.#timeMs; }
+  get won()        { return this.#phase === 'won'; }
+  get gameOver()   { return this.#phase === 'gameover'; }
+  get stageName()  { return this.#stage ? this.#stage.name : ''; }
+  get stageIndex() { return this.#stageIdx; }
+  get stageCount() { return STAGES.length; }
+  // 推論(ライブ描画)が必要なフェーズか。RUN/結果中は固定表示にして軽く・スムーズにする。
+  get live()       { return this.#phase === 'idle' || this.#phase === 'pose'; }
 
   setMask(mask, w, h) { this.#mask = mask; this.#mw = w; this.#mh = h; }
 
-  // 正規化矩形 → ワールド矩形
   #toWorld(r) {
     return { x: r.x * WORLD_W, y: r.y * WORLD_H, w: r.w * WORLD_W, h: r.h * WORLD_H };
   }
@@ -89,51 +93,68 @@ export class Game {
     this.#stageIdx = i;
     const s = STAGES[i];
     this.#stage = {
-      name: s.name, gravity: s.gravity, shadowPush: s.shadowPush,
+      name: s.name, poseMs: s.poseMs, gravity: s.gravity,
       shadowRest: s.shadowRest, fallGameOver: s.fallGameOver,
       platforms: s.platforms.map(p => this.#toWorld(p)),
       goal: this.#toWorld(s.goal),
+      ballStart: { x: s.ballStart.x * WORLD_W, y: s.ballStart.y * WORLD_H },
     };
-    this.#ball = {
-      x: s.ballStart.x * WORLD_W, y: s.ballStart.y * WORLD_H,
-      vx: 0, vy: 0, color: BALL_COLORS[i % BALL_COLORS.length],
-    };
+    this.#resetBall();
+    this.#cap = null;
     this.#flash = 0;
   }
 
-  // 最初(STAGE 1)からやり直し
+  #resetBall() {
+    const st = this.#stage;
+    this.#ball = { x: st.ballStart.x, y: st.ballStart.y, vx: 0, vy: 0 };
+  }
+
+  // 最初(ステージ1)から
   reset() {
     this.#loadStage(0);
-    this.#running = false; this.#won = false; this.#gameOver = false;
+    this.#phase = 'idle';
     this.#timeMs = 0; this.#banner = null;
   }
 
-  // 現在ステージをやり直し(GAME OVER 後)。タイムは継続。
-  #retryStage() {
-    this.#loadStage(this.#stageIdx);
-    this.#gameOver = false;
-  }
-
+  // スタート: 現在ステージの「構え」を開始。
+  //   クリア後は最初から。GAME OVER 後は同じステージをもう一度。
   start() {
-    if (this.#won)            this.reset();        // クリア後は最初から
-    else if (this.#gameOver)  this.#retryStage();  // GAME OVER はこのステージから
-    this.#running = true;
+    if (this.#phase === 'won') this.#loadStage(0);
+    else                       this.#loadStage(this.#stageIdx);
+    this.#phase = 'pose';
+    this.#poseTimer = this.#stage.poseMs;
+    this.#banner = null;
   }
 
-  // --- マスクサンプリング (バイリニア, 0..1) ---
+  // 構え終了 → その瞬間のシルエットを固定して RUN へ
+  #capture() {
+    if (this.#mask) {
+      this.#cap = Float32Array.from(this.#mask);
+      this.#cw = this.#mw; this.#ch = this.#mh; this.#cmir = this.mirror;
+    } else {
+      this.#cap = null;
+    }
+    this.#resetBall();
+    this.#timeMs = 0;
+    this.#flash = 350;
+    this.#banner = { text: 'キャプチャ！', t: 1100 };
+    this.#phase = 'run';
+  }
+
+  // --- 固定マスクのサンプリング (バイリニア, 0..1) ---
   #maskAt(nx, ny) {
-    const mask = this.#mask;
+    const mask = this.#cap;
     if (!mask) return 0;
     nx = nx < 0 ? 0 : nx > 1 ? 1 : nx;
     ny = ny < 0 ? 0 : ny > 1 ? 1 : ny;
-    if (this.mirror) nx = 1 - nx;
-    const fx = nx * (this.#mw - 1);
-    const fy = ny * (this.#mh - 1);
+    if (this.#cmir) nx = 1 - nx;
+    const fx = nx * (this.#cw - 1);
+    const fy = ny * (this.#ch - 1);
     const x0 = fx | 0, y0 = fy | 0;
-    const x1 = x0 + 1 < this.#mw ? x0 + 1 : x0;
-    const y1 = y0 + 1 < this.#mh ? y0 + 1 : y0;
+    const x1 = x0 + 1 < this.#cw ? x0 + 1 : x0;
+    const y1 = y0 + 1 < this.#ch ? y0 + 1 : y0;
     const tx = fx - x0, ty = fy - y0;
-    const w = this.#mw;
+    const w = this.#cw;
     const a = mask[y0 * w + x0], b = mask[y0 * w + x1];
     const c = mask[y1 * w + x0], d = mask[y1 * w + x1];
     const top = a + (b - a) * tx;
@@ -145,16 +166,21 @@ export class Game {
   update(dtMs) {
     if (this.#flash > 0)  this.#flash  = Math.max(0, this.#flash - dtMs);
     if (this.#banner)     { this.#banner.t -= dtMs; if (this.#banner.t <= 0) this.#banner = null; }
-    if (!this.#running || this.#won || this.#gameOver) return;
+
+    if (this.#phase === 'pose') {
+      this.#poseTimer -= dtMs;
+      if (this.#poseTimer <= 0) this.#capture();
+      return;
+    }
+    if (this.#phase !== 'run') return;
 
     this.#timeMs += dtMs;
     let dt = dtMs / 1000;
-    if (dt > 0.05) dt = 0.05; // フレーム飛び抑制
+    if (dt > 0.05) dt = 0.05;
 
     const ball = this.#ball;
     const st = this.#stage;
 
-    // すり抜け防止のサブステップ
     const speed = Math.hypot(ball.vx, ball.vy);
     let steps = Math.ceil((speed * dt) / (BALL_R * 0.4)) || 1;
     if (steps > 12) steps = 12;
@@ -169,7 +195,6 @@ export class Game {
       for (const p of st.platforms) this.#collidePlatform(ball, p);
     }
 
-    // 速度上限
     const sp = Math.hypot(ball.vx, ball.vy);
     if (sp > MAX_SPEED) { ball.vx *= MAX_SPEED / sp; ball.vy *= MAX_SPEED / sp; }
 
@@ -184,20 +209,20 @@ export class Game {
       this.#flash = 350;
       if (this.#stageIdx + 1 < STAGES.length) {
         this.#loadStage(this.#stageIdx + 1);
-        this.#banner = { text: this.#stage.name, t: 1800 };
+        this.#phase = 'pose';
+        this.#poseTimer = this.#stage.poseMs;
+        this.#banner = { text: this.#stage.name, t: 2000 };
       } else {
-        this.#won = true; this.#running = false;
+        this.#phase = 'won';
       }
       return;
     }
 
-    // 落下判定
-    if (st.fallGameOver && ball.y - BALL_R > WORLD_H) {
-      this.#gameOver = true; this.#running = false;
-    }
+    // 落下 → GAME OVER
+    if (st.fallGameOver && ball.y - BALL_R > WORLD_H) this.#phase = 'gameover';
   }
 
-  // ボールと影の衝突: マスク勾配から法線を求めて 押し出し+反射(+押し力)
+  // ボールと固定シルエットの衝突: マスク勾配から法線→押し出し+反射
   #collideShadow(ball, st) {
     const nx = ball.x / WORLD_W, ny = ball.y / WORLD_H;
     const eX = BALL_R / WORLD_W, eY = BALL_R / WORLD_H;
@@ -213,7 +238,7 @@ export class Game {
     const mag = Math.hypot(gx, gy);
     let onx, ony;
     if (mag > 1e-3) { onx = -gx / mag; ony = -gy / mag; }
-    else            { onx = 0; ony = -1; } // 深く埋もれたら上へ逃がす
+    else            { onx = 0; ony = -1; }
 
     ball.x += onx * BALL_R * 0.45;
     ball.y += ony * BALL_R * 0.45;
@@ -223,9 +248,8 @@ export class Game {
       ball.vx -= (1 + st.shadowRest) * vn * onx;
       ball.vy -= (1 + st.shadowRest) * vn * ony;
     }
-    // 影で押す(STAGE 2 のジャンプ等)。STAGE 1 は shadowPush=0 で坂のみ。
-    ball.vx += onx * st.shadowPush;
-    ball.vy += ony * st.shadowPush;
+    // 上面に乗っているときは横を軽く減衰(止まりやすく)
+    if (ony < -0.5) ball.vx *= 0.99;
   }
 
   // ボールと矩形足場の衝突 (円 vs AABB)
@@ -241,7 +265,6 @@ export class Game {
       const d = Math.sqrt(d2);
       nx = dx / d; ny = dy / d; overlap = BALL_R - d;
     } else {
-      // 中心が矩形内: 最も近い辺へ押し出す
       const left = ball.x - p.x, right = p.x + p.w - ball.x;
       const top = ball.y - p.y, bot = p.y + p.h - ball.y;
       const m = Math.min(left, right, top, bot);
@@ -260,7 +283,6 @@ export class Game {
       ball.vx -= (1 + PLAT_REST) * vn * nx;
       ball.vy -= (1 + PLAT_REST) * vn * ny;
     }
-    // 上面に乗っているときは横を減衰(転がりすぎ防止)
     if (ny < -0.7) ball.vx *= FLOOR_FRIC;
   }
 
@@ -273,18 +295,34 @@ export class Game {
     if (!this.#stage) return;
 
     for (const p of this.#stage.platforms) this.#drawPlatform(ctx, p);
+    this.#drawStartMarker(ctx);
     this.#drawGoal(ctx);
-    if (this.#ball) this.#drawBall(ctx, this.#ball.x, this.#ball.y, this.#ball.color);
+
+    // ボールは RUN/結果中のみ表示
+    if (this.#phase === 'run' || this.#phase === 'won' || this.#phase === 'gameover') {
+      this.#drawBall(ctx, this.#ball.x, this.#ball.y, BALL_COLOR);
+    }
 
     this.#drawStageLabel(ctx);
+    if (this.#phase === 'pose')  this.#drawCountdown(ctx);
     this.#drawBanner(ctx);
   }
 
   #drawPlatform(ctx, p) {
     ctx.fillStyle = 'rgba(40, 48, 66, 0.92)';
     ctx.fillRect(p.x, p.y, p.w, p.h);
-    ctx.fillStyle = 'rgba(120, 150, 200, 0.9)'; // 上面ハイライト
-    ctx.fillRect(p.x, p.y, p.w, Math.max(4, p.h * 0.18));
+    ctx.fillStyle = 'rgba(120, 150, 200, 0.9)';
+    ctx.fillRect(p.x, p.y, p.w, Math.max(4, p.h * 0.4));
+  }
+
+  #drawStartMarker(ctx) {
+    const b = this.#stage.ballStart;
+    ctx.save();
+    ctx.setLineDash([10, 10]);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = 'rgba(255, 210, 63, 0.7)';
+    ctx.beginPath(); ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2); ctx.stroke();
+    ctx.restore();
   }
 
   #drawGoal(ctx) {
@@ -333,13 +371,26 @@ export class Game {
     ctx.restore();
   }
 
+  #drawCountdown(ctx) {
+    const sec = Math.ceil(this.#poseTimer / 1000);
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = 'bold 44px sans-serif';
+    ctx.fillText('みんなで橋を作って！', WORLD_W / 2, WORLD_H * 0.16);
+    ctx.fillStyle = '#ffd23f';
+    ctx.font = 'bold 200px sans-serif';
+    ctx.fillText(String(sec), WORLD_W / 2, WORLD_H * 0.5);
+    ctx.restore();
+  }
+
   #drawBanner(ctx) {
     if (!this.#banner) return;
     const a = Math.min(1, this.#banner.t / 400);
     ctx.save();
     ctx.globalAlpha = a;
     ctx.fillStyle = '#ffd23f';
-    ctx.font = 'bold 88px sans-serif';
+    ctx.font = 'bold 96px sans-serif';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
     ctx.fillText(this.#banner.text, WORLD_W / 2, WORLD_H * 0.4);
     ctx.restore();
