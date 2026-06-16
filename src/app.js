@@ -44,13 +44,21 @@ const resultHintEl  = document.getElementById('result-hint');
 const ALPHA_RISE = 0.75;
 const ALPHA_FALL = 0.85;
 
+// --- 推論を軽くするレバー ---
+//   PROC_W      : 推論用に入力をこの幅へ縮小(表示は別途拡大)。出力マスクも小さくなり
+//                 JS側のEMA/書き出しループも一気に軽くなる。
+//   INFER_EVERY : 数フレームに1回だけ推論し、間は直前のマスクを使い回す(体感2〜3倍)。
+const PROC_W      = 256;
+const INFER_EVERY = 3;
+
 const INFERENCE_CONFIG = {
   flipHorizontal:        false,
   // 描画はモザイク(粗いセル)に量子化されるため、マスクは過剰に高解像度でも
   //   見た目はほぼ変わらない。そこで internalResolution は 'medium' に下げて
   //   推論を軽くし、描画レート(=スムーズさ)を稼ぐ。見た目の精度は維持される。
   //   手先・輪郭の途切れは segmentationThreshold を低く保つことで補う。
-  internalResolution:    'medium',
+  //   'low' は BodyPix で最も速度に効く(入力を縮めてから推論する)。
+  internalResolution:    'low',
   // 白い服など「背景との差が小さく確信度が下がる」画素を拾えるよう低めに設定。
   //   下げるほど欠けにくくなるが、背景ノイズも混ざりやすくなる(0.2〜0.3 が目安)。
   segmentationThreshold: 0.2,
@@ -61,9 +69,9 @@ const INFERENCE_CONFIG = {
 //   多人数ポーズ検出パラメタ(maxDetections 等)を渡す。
 const OVERLAP_CONFIG = {
   flipHorizontal:        false,
-  internalResolution:    'medium',
+  internalResolution:    'low',
   segmentationThreshold: 0.3,
-  maxDetections:         6,
+  maxDetections:         2,
   scoreThreshold:        0.3,
   nmsRadius:             20,
 };
@@ -175,13 +183,26 @@ async function main() {
   let buf    = null; // RGBA 書き出しバッファ
   let paused = false;
 
+  // 推論用の縮小キャンバス。映像を PROC_W 幅へ落としてから推論に渡すことで、
+  //   推論コストと、出力マスクに対する JS ループ(EMA/書き出し/分割)を大幅に軽くする。
+  const procCanvas = document.createElement('canvas');
+  const procCtx    = procCanvas.getContext('2d', { willReadFrequently: false });
+
   function syncMaskSize() {
     maskCanvas.width  = camera.width;
     maskCanvas.height = camera.height;
+    procCanvas.width  = PROC_W;
+    procCanvas.height = Math.max(1, Math.round(PROC_W * camera.height / camera.width));
     smBody = null;
     buf    = null;
   }
   syncMaskSize();
+
+  // 縮小キャンバスへ現在のフレームを描いて、推論入力として返す
+  function grabInput() {
+    procCtx.drawImage(video, 0, 0, procCanvas.width, procCanvas.height);
+    return procCanvas;
+  }
 
   // --- カメラ列挙・切替 ---
   async function populateCameras() {
@@ -221,14 +242,17 @@ async function main() {
 
   // --- BodyPix モデル ---
   statusEl.textContent = 'BodyPix を読み込み中...';
+  // backend(WebGL/CPU 等)の初期化を待って、どれが使われているか確認する
+  await tf.ready();
+  console.log('TF backend:', tf.getBackend());
   // multiplier を上げるとモデル容量が増え、斜め/非正面の姿勢や手先の認識が安定する。
   //   さらに堅くしたい場合は architecture:'ResNet50'(高精度・重い) も選択肢。
   const net = await bodyPix.load({
     architecture: 'MobileNetV1',
+    // MobileNet の outputStride は 8 か 16 のみ(32は配信が無く404になる)。16=軽い。
     outputStride: 16,
-    // 白い服・斜めの姿勢などで認識が甘いときは容量を上げると安定する(0.75→1.0)。
-    //   さらに堅くしたいなら architecture:'ResNet50'(高精度・重い)。
-    multiplier:   1.0,
+    // 軽さ優先で 0.5。重さの主因なら下げる(※ MobileNet は 0.5/0.75/1.0 のみ。0.25は配信無し)。
+    multiplier:   0.5,
     quantBytes:   2,
   });
 
@@ -238,6 +262,7 @@ async function main() {
   let lastFpsTime = performance.now();
   let lastFrame   = performance.now();
   let processing  = false;
+  let inferTick   = 0;   // 推論の間引き用フレームカウンタ
 
   // --- ゲーム操作 (モードで対象を切り替え) ---
   gameStartBtn.addEventListener('click', () => {
@@ -315,9 +340,10 @@ async function main() {
 
     // 推論はライブ表示が要るフェーズ(idle/構え)のみ実行。
     //   実行(RUN)/結果中は固定したシルエットのまま＝推論を止めて軽く・スムーズにする。
-    if (game.live && camera.ready && !processing && !paused) {
+    if (game.live && camera.ready && !processing && !paused
+        && inferTick % INFER_EVERY === 0) {
       processing = true;
-      net.segmentPerson(camera.element, INFERENCE_CONFIG).then(seg => {
+      net.segmentPerson(grabInput(), INFERENCE_CONFIG).then(seg => {
         if (seg && seg.data) {
           writeSilhouette(seg.data, seg.width, seg.height);
           game.setMask(smBody, seg.width, seg.height); // 当たり判定用に最新マスク
@@ -339,9 +365,10 @@ async function main() {
     updateGameHud();
 
     // 重なりはリアルタイムに変わるので、フェーズに関係なく常に推論する。
-    if (camera.ready && !processing && !paused) {
+    if (camera.ready && !processing && !paused
+        && inferTick % INFER_EVERY === 0) {
       processing = true;
-      net.segmentPerson(camera.element, OVERLAP_CONFIG).then(seg => {
+      net.segmentPerson(grabInput(), OVERLAP_CONFIG).then(seg => {
         if (seg && seg.data) {
           const w = seg.width, h = seg.height;
           writeSilhouette(seg.data, w, h); // 統合マスクをそのままシルエット表示
@@ -362,6 +389,7 @@ async function main() {
     const tNow = performance.now();
     const dtMs = tNow - lastFrame;
     lastFrame = tNow;
+    inferTick++;
 
     if (mode === 'overlap') stepOverlap(dtMs);
     else                    stepCapture(dtMs);
