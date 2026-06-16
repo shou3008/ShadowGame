@@ -4,9 +4,11 @@
 //   - 頭/手などの部位判定は行わない（必要になったら別途追加する）。
 const bodyPix = window['body-pix'];
 
-import { Camera }   from './camera.js';
-import { Renderer } from './renderer.js';
-import { Game }     from './game.js';
+import { Camera }       from './camera.js';
+import { Renderer }     from './renderer.js';
+import { Game }         from './game.js';
+import { OverlapGame }  from './overlap-game.js';
+import { OverlapField } from './overlap.js';
 
 const video    = document.getElementById('video');
 const canvas   = document.getElementById('canvas');
@@ -54,6 +56,18 @@ const INFERENCE_CONFIG = {
   segmentationThreshold: 0.2,
 };
 
+// 「重なりコア」モード用: 軽い segmentPerson(統合マスク + allPoses) を使う。
+//   重い segmentMultiPerson(instance マスク) は使わない。allPoses を出すため
+//   多人数ポーズ検出パラメタ(maxDetections 等)を渡す。
+const OVERLAP_CONFIG = {
+  flipHorizontal:        false,
+  internalResolution:    'medium',
+  segmentationThreshold: 0.3,
+  maxDetections:         6,
+  scoreThreshold:        0.3,
+  nmsRadius:             20,
+};
+
 // --- UI controls ---
 const ctrlFg     = document.getElementById('ctrl-fg');
 const ctrlBg     = document.getElementById('ctrl-bg');
@@ -63,6 +77,7 @@ const ctrlFlip   = document.getElementById('ctrl-flip');
 const ctrlCamera = document.getElementById('ctrl-camera');
 const ctrlCell   = document.getElementById('ctrl-cell');
 const ctrlCellVal = document.getElementById('ctrl-cell-val');
+const ctrlMode   = document.getElementById('ctrl-mode');
 
 function hexToVec4(hex) {
   return new Float32Array([
@@ -107,6 +122,27 @@ async function main() {
 
   const renderer = new Renderer(canvas);
   const game     = new Game(gameCanvas);
+
+  // --- 並行モード「影の重なりコア」 ---
+  //   既存のキャプチャ方式(game)はそのまま残し、UI で切り替える。
+  let mode = ctrlMode.value === 'overlap' ? 'overlap' : 'capture';
+  const overlapGame  = new OverlapGame(gameCanvas);
+  const overlapField = new OverlapField();
+  // デバッグ補助: 一人で動作確認したいとき。
+  //   - A キー or __shadow.overlapField.soloArms = true で「腕2本の重なりで solid」モード(即オフも可)。
+  //   - __shadow.overlapField.pad で交差の当たりの甘さ(0=真の交差)、countThresh=1 で全身単独も可。
+  window.__shadow = { overlapField, overlapGame, game };
+  window.addEventListener('keydown', e => {
+    if (e.key === 'a' || e.key === 'A') {
+      overlapField.soloArms = !overlapField.soloArms;
+      statusEl.textContent = `腕2本デバッグ: ${overlapField.soloArms ? 'ON' : 'OFF'}`;
+    }
+  });
+  ctrlMode.addEventListener('change', () => {
+    mode = ctrlMode.value === 'overlap' ? 'overlap' : 'capture';
+    smBody = null; buf = null;     // モード切替時はマスクEMAを作り直す
+    if (mode === 'overlap') overlapGame.reset();
+  });
 
   function fitCanvas() {
     const aspect = camera.width / camera.height;
@@ -203,11 +239,30 @@ async function main() {
   let lastFrame   = performance.now();
   let processing  = false;
 
-  // --- ゲーム操作 ---
-  gameStartBtn.addEventListener('click', () => { game.start(); });
-  gameResetBtn.addEventListener('click', () => { game.reset(); });
+  // --- ゲーム操作 (モードで対象を切り替え) ---
+  gameStartBtn.addEventListener('click', () => {
+    if (mode === 'overlap') overlapGame.reset(); else game.start();
+  });
+  gameResetBtn.addEventListener('click', () => {
+    if (mode === 'overlap') overlapGame.reset(); else game.reset();
+  });
 
   function updateGameHud() {
+    if (mode === 'overlap') {
+      gameTimerEl.textContent  = '';
+      gameRemainEl.textContent = '重なりコア（2人で影を接触→足場）';
+      if (overlapGame.won) {
+        resultTitleEl.textContent = 'CLEAR!';
+        resultTimeEl.textContent  = '';
+        resultHintEl.textContent  = '「リセット」でもう一度';
+        gameResultEl.classList.remove('gameover');
+        gameResultEl.hidden = false;
+      } else {
+        gameResultEl.hidden = true;
+      }
+      return;
+    }
+
     gameTimerEl.textContent  = (game.timeMs / 1000).toFixed(1) + 's';
     const phaseLabel = game.phase === 'pose' ? '（構え中）'
                      : game.phase === 'run'  ? '（実行中）' : '';
@@ -230,21 +285,31 @@ async function main() {
     }
   }
 
-  function loop() {
-    // --- ゲームは推論レートに依存せず毎フレーム(60fps)更新・描画 ---
-    const tNow = performance.now();
-    const dtMs = tNow - lastFrame;
-    lastFrame = tNow;
+  // union(Uint8) を 既存EMA→buf→maskCanvas に流して シルエット表示する共通処理
+  function writeSilhouette(src, w, h) {
+    const N = w * h;
+    if (!smBody || smBody.length !== N) {
+      smBody = new Float32Array(N);
+      buf    = new Uint8ClampedArray(N * 4);
+    }
+    for (let i = 0; i < N; i++) {
+      ema(smBody, i, src[i] ? 1 : 0);
+      buf[i * 4 + 3] = smBody[i] * 255; // A = body 所属度 (R/G/B は 0)
+    }
+    if (maskCanvas.width !== w || maskCanvas.height !== h) {
+      maskCanvas.width = w; maskCanvas.height = h;
+    }
+    maskCtx.putImageData(new ImageData(buf, w, h), 0, 0);
+  }
+
+  // --- 既存: キャプチャ方式 ---
+  function stepCapture(dtMs) {
     game.mirror = config.mirror;
     game.update(dtMs);
 
     // シルエットは毎フレーム描画する。maskCanvas は推論時のみ更新されるため、
     //   実行(RUN)中は固定シルエットがそのまま再描画され、消えずに残る。
-    renderer.render(maskCanvas, {
-      camW: camera.width, camH: camera.height,
-      ...config,
-    });
-
+    renderer.render(maskCanvas, { camW: camera.width, camH: camera.height, ...config });
     game.draw();
     updateGameHud();
 
@@ -252,42 +317,54 @@ async function main() {
     //   実行(RUN)/結果中は固定したシルエットのまま＝推論を止めて軽く・スムーズにする。
     if (game.live && camera.ready && !processing && !paused) {
       processing = true;
-
-      // 人物セグメンテーション (全員分を 1 枚の二値マスクに統合)
-      //   返り値: SemanticPersonSegmentation — { data: Uint8Array, width, height, allPoses }
-      //   data[i] は その画素が人なら 1、そうでなければ 0
       net.segmentPerson(camera.element, INFERENCE_CONFIG).then(seg => {
         if (seg && seg.data) {
-          const w = seg.width, h = seg.height;
-          const N = w * h;
-          const data = seg.data;
-
-          if (!smBody || smBody.length !== N) {
-            smBody = new Float32Array(N);
-            buf    = new Uint8ClampedArray(N * 4);
-          }
-
-          // EMA(連続) → RGBA 書き出し。二値化せず連続値のまま渡すので、
-          // 動かない画素は値が一定でちらつかず、動いた画素だけが滑らかに追従する。
-          for (let i = 0; i < N; i++) {
-            ema(smBody, i, data[i] ? 1 : 0);
-            buf[i * 4 + 3] = smBody[i] * 255; // A = body 所属度 (R/G/B は 0)
-          }
-          if (maskCanvas.width !== w || maskCanvas.height !== h) {
-            maskCanvas.width = w; maskCanvas.height = h;
-          }
-          maskCtx.putImageData(new ImageData(buf, w, h), 0, 0);
-
-          // ゲームの当たり判定用に最新マスク(連続値 smBody)を渡す
-          game.setMask(smBody, w, h);
+          writeSilhouette(seg.data, seg.width, seg.height);
+          game.setMask(smBody, seg.width, seg.height); // 当たり判定用に最新マスク
         }
-
         processing = false;
       }).catch(err => {
         console.error('BodyPix error:', err);
         processing = false;
       });
     }
+  }
+
+  // --- 並行: 影の重なりコア (軽い segmentPerson + allPoses → 膨張接触 solid) ---
+  function stepOverlap(dtMs) {
+    overlapGame.update(dtMs);
+    // 背景シルエット(全員の統合マスク)は既存 renderer で表示。solid と丸は overlapGame が上に描く。
+    renderer.render(maskCanvas, { camW: camera.width, camH: camera.height, ...config });
+    overlapGame.draw();
+    updateGameHud();
+
+    // 重なりはリアルタイムに変わるので、フェーズに関係なく常に推論する。
+    if (camera.ready && !processing && !paused) {
+      processing = true;
+      net.segmentPerson(camera.element, OVERLAP_CONFIG).then(seg => {
+        if (seg && seg.data) {
+          const w = seg.width, h = seg.height;
+          writeSilhouette(seg.data, w, h); // 統合マスクをそのままシルエット表示
+          // allPoses で2人に分割し、接触領域 solid を求める
+          const { solid, gw, gh } = overlapField.process(seg.data, seg.allPoses, w, h, config.mirror);
+          overlapGame.setMask(solid, gw, gh);
+        }
+        processing = false;
+      }).catch(err => {
+        console.error('BodyPix(overlap) error:', err);
+        processing = false;
+      });
+    }
+  }
+
+  function loop() {
+    // --- ゲームは推論レートに依存せず毎フレーム(60fps)更新・描画 ---
+    const tNow = performance.now();
+    const dtMs = tNow - lastFrame;
+    lastFrame = tNow;
+
+    if (mode === 'overlap') stepOverlap(dtMs);
+    else                    stepCapture(dtMs);
 
     frameCount++;
     const now = performance.now();

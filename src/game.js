@@ -18,6 +18,12 @@ const MASK_THRESH = 0.5;
 const FLOOR_FRIC  = 0.94;
 const PLAT_REST   = 0.18;
 
+// 影との衝突(安定接地)用
+//   SHADOW_RING   : ボール円周をいくつの点でサンプリングして接触を見るか
+//   SHADOW_CORRECT: めり込みを1フレームでどれだけ戻すか(0..1)。低いほど柔らかく安定
+const SHADOW_RING    = 8;
+const SHADOW_CORRECT = 0.6;
+
 const BALL_COLOR = '#ffd23f';
 
 // --- ステージ定義 (矩形・座標はすべて 0..1 の正規化値) ---
@@ -64,6 +70,10 @@ export class Game {
 
   mirror = true;        // 表示の左右反転に合わせてマスクをサンプリング
 
+  // 物理チューニング(DevTools から実機調整可能。null はステージ値を使う)
+  //   correct: 押し出しの戻し率 / fric: 接線摩擦 / rest: 反発 / gravity: 重力
+  tune = { correct: SHADOW_CORRECT, fric: null, rest: null, gravity: null };
+
   #mask = null; #mw = 0; #mh = 0;             // ライブのマスク(参照)
   #cap = null; #cw = 0; #ch = 0; #cmir = true; // キャプチャした固定マスク(コピー)
 
@@ -94,7 +104,8 @@ export class Game {
     const s = STAGES[i];
     this.#stage = {
       name: s.name, poseMs: s.poseMs, gravity: s.gravity,
-      shadowRest: s.shadowRest, fallGameOver: s.fallGameOver,
+      shadowRest: s.shadowRest, shadowFric: s.shadowFric ?? 0.06,
+      fallGameOver: s.fallGameOver,
       platforms: s.platforms.map(p => this.#toWorld(p)),
       goal: this.#toWorld(s.goal),
       ballStart: { x: s.ballStart.x * WORLD_W, y: s.ballStart.y * WORLD_H },
@@ -186,8 +197,9 @@ export class Game {
     if (steps > 12) steps = 12;
     const h = dt / steps;
 
+    const gravity = this.tune.gravity ?? st.gravity;
     for (let s = 0; s < steps; s++) {
-      ball.vy += st.gravity * h;
+      ball.vy += gravity * h;
       ball.vx *= AIR; ball.vy *= AIR;
       ball.x  += ball.vx * h;
       ball.y  += ball.vy * h;
@@ -222,34 +234,49 @@ export class Game {
     if (st.fallGameOver && ball.y - BALL_R > WORLD_H) this.#phase = 'gameover';
   }
 
-  // ボールと固定シルエットの衝突: マスク勾配から法線→押し出し+反射
+  // ボールと固定シルエットの衝突 (安定接地):
+  //   ボール円周(リング)上で影のカバレッジをサンプリングし、影が食い込んでいる向きと
+  //   "めり込み量" を連続値で求める。押し出しは固定量ではなく深さに比例させる(+slop)ので、
+  //   平らな影には震えずに乗り、坂では接触を保ったまま重力で転がる。
   #collideShadow(ball, st) {
-    const nx = ball.x / WORLD_W, ny = ball.y / WORLD_H;
-    const eX = BALL_R / WORLD_W, eY = BALL_R / WORLD_H;
+    const R = BALL_R;
+    let sx = 0, sy = 0, wsum = 0, n = 0;
+    for (let i = 0; i < SHADOW_RING; i++) {
+      const a  = (i / SHADOW_RING) * Math.PI * 2;
+      const ox = Math.cos(a), oy = Math.sin(a);
+      const cov = this.#maskAt((ball.x + ox * R) / WORLD_W, (ball.y + oy * R) / WORLD_H);
+      if (cov > MASK_THRESH) {
+        const w = cov - MASK_THRESH;   // 連続: 深いほど大
+        sx -= ox * w; sy -= oy * w;     // 影のある向きと逆へ押す
+        wsum += w; n++;
+      }
+    }
+    if (n === 0) return;
 
-    const c = this.#maskAt(nx, ny);
-    const l = this.#maskAt(nx - eX, ny), r = this.#maskAt(nx + eX, ny);
-    const u = this.#maskAt(nx, ny - eY), d = this.#maskAt(nx, ny + eY);
-
-    if (c < MASK_THRESH && l < MASK_THRESH && r < MASK_THRESH &&
-        u < MASK_THRESH && d < MASK_THRESH) return;
-
-    let gx = r - l, gy = d - u;
-    const mag = Math.hypot(gx, gy);
+    let nlen = Math.hypot(sx, sy);
     let onx, ony;
-    if (mag > 1e-3) { onx = -gx / mag; ony = -gy / mag; }
-    else            { onx = 0; ony = -1; }
+    if (nlen > 1e-4) { onx = sx / nlen; ony = sy / nlen; }
+    else             { onx = 0; ony = -1; }
 
-    ball.x += onx * BALL_R * 0.45;
-    ball.y += ony * BALL_R * 0.45;
+    // めり込み深さ(0..R) ∝ 平均の超過カバレッジ。固定量ではないので震えない。
+    const correct = this.tune.correct ?? SHADOW_CORRECT;
+    const depth = R * Math.min(1, (wsum / n) / (1 - MASK_THRESH));
+    ball.x += onx * depth * correct;
+    ball.y += ony * depth * correct;
 
+    // 法線方向: めり込む速度だけ取り除く(+わずかな反発)
+    const rest = this.tune.rest ?? st.shadowRest;
     const vn = ball.vx * onx + ball.vy * ony;
     if (vn < 0) {
-      ball.vx -= (1 + st.shadowRest) * vn * onx;
-      ball.vy -= (1 + st.shadowRest) * vn * ony;
+      ball.vx -= (1 + rest) * vn * onx;
+      ball.vy -= (1 + rest) * vn * ony;
     }
-    // 上面に乗っているときは横を軽く減衰(止まりやすく)
-    if (ony < -0.5) ball.vx *= 0.99;
+    // 接線方向: 摩擦で転がりを制御 (小さいほどよく転がる)
+    const fric = this.tune.fric ?? st.shadowFric;
+    const tx = -ony, ty = onx;
+    const vt = ball.vx * tx + ball.vy * ty;
+    ball.vx -= vt * fric * tx;
+    ball.vy -= vt * fric * ty;
   }
 
   // ボールと矩形足場の衝突 (円 vs AABB)

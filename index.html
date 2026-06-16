@@ -25,6 +25,13 @@
           <label class="check"><input type="checkbox" id="ctrl-flip" checked>左右反転</label>
         </div>
         <div class="tool-group">
+          <label for="ctrl-mode">モード</label>
+          <select id="ctrl-mode">
+            <option value="capture">キャプチャ</option>
+            <option value="overlap">重なりコア(実験)</option>
+          </select>
+        </div>
+        <div class="tool-group">
           <label for="ctrl-scale">解像度</label>
           <input type="range" id="ctrl-scale" min="10" max="100" step="5" value="100">
           <span id="ctrl-scale-val">-- px</span>
