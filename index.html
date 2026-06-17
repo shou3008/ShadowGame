@@ -18,18 +18,18 @@
     <div id="ui">
       <div id="toolbar">
         <div class="tool-group">
+          <label for="ctrl-mode">モード</label>
+          <select id="ctrl-mode">
+            <option value="capture">キャプチャ協力</option>
+            <option value="realtime">リアルタイム重なり</option>
+          </select>
+        </div>
+        <div class="tool-group">
           <label for="ctrl-camera">カメラ</label>
           <select id="ctrl-camera"><option>読み込み中...</option></select>
         </div>
         <div class="tool-group">
           <label class="check"><input type="checkbox" id="ctrl-flip" checked>左右反転</label>
-        </div>
-        <div class="tool-group">
-          <label for="ctrl-mode">モード</label>
-          <select id="ctrl-mode">
-            <option value="capture">キャプチャ</option>
-            <option value="overlap">重なりコア(実験)</option>
-          </select>
         </div>
         <div class="tool-group">
           <label for="ctrl-scale">解像度</label>

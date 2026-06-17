@@ -13,12 +13,7 @@
       "Bash(node --check /tmp/a.mjs)",
       "Bash(git restore *)",
       "Bash(cd c:/Users/shoud/github/ShadowGame && cp src/app.js /tmp/a.mjs && node --check /tmp/a.mjs && echo OK)",
-      "Bash(node --check /tmp/g.mjs)",
-      "Bash(git --no-pager ls-tree -r --name-only 00f73d6)",
-      "Bash(grep -E '\\\\.\\(js|html\\)$')",
-      "Bash(git --no-pager ls-tree -r --name-only f7ea912)",
-      "Bash(git --no-pager ls-tree -r --name-only 4bc0c4f)",
-      "Bash(git --no-pager show 00f73d6:src/app.js)"
+      "Bash(node --check /tmp/g.mjs)"
     ],
     "additionalDirectories": [
       "\\tmp"
