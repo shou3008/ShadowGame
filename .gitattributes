@@ -1,0 +1,10 @@
+# テキストは LF に正規化（Windows/その他で改行を統一）
+* text=auto eol=lf
+
+# バイナリは変換しない
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.tflite binary
+*.wasm binary

@@ -1,0 +1,24 @@
+# Dependencies (NPM)
+node_modules/
+
+# ML model files (binary, large)
+models/
+*.tflite
+*.task
+*.onnx
+*.pb
+*.bin
+
+# OS / editor metadata
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# Logs / temp
+*.log
+*.tmp
+
+# Claude Code: ローカル個別設定
+.claude/settings.local.json

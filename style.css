@@ -1,0 +1,194 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #111;
+  font-family: sans-serif;
+  color: #eee;
+  overflow: hidden;
+}
+
+#video {
+  display: none;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+#canvas {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+}
+
+/* ゲームオブジェクト用オーバーレイ (シルエット canvas に重ねる) */
+#game {
+  position: absolute;
+  pointer-events: none;
+  z-index: 5;
+}
+
+/* クリア表示 */
+#game-result {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 8;
+  text-align: center;
+  pointer-events: none;
+  background: rgba(0, 0, 0, 0.55);
+  padding: 28px 56px;
+  border-radius: 16px;
+  border: 2px solid rgba(90, 240, 138, 0.7);
+}
+#game-result[hidden] { display: none; }
+.result-title {
+  font-size: 56px;
+  font-weight: 800;
+  color: #5af08a;
+  letter-spacing: 2px;
+}
+#game-result.gameover {
+  border-color: rgba(255, 90, 90, 0.8);
+}
+#game-result.gameover .result-title {
+  color: #ff6464;
+}
+.result-time { font-size: 32px; margin-top: 6px; color: #fff; }
+.result-hint { font-size: 14px; margin-top: 10px; color: #aaa; }
+
+.game-btn {
+  background: rgba(90, 240, 138, 0.18);
+  border: 1px solid rgba(90, 240, 138, 0.6);
+  color: #aef5c6;
+  border-radius: 6px;
+  padding: 4px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.game-btn:hover { background: rgba(90, 240, 138, 0.35); }
+#game-timer { font-size: 14px; color: #5af08a; min-width: 52px; font-variant-numeric: tabular-nums; }
+#game-remain { font-size: 13px; color: #ccc; }
+
+#ui {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+}
+
+#toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 18px;
+  padding: 8px 14px;
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(4px);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.tool-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.tool-group.spacer {
+  margin-left: auto;
+}
+
+#toolbar label {
+  white-space: nowrap;
+}
+
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+
+#status {
+  font-size: 13px;
+  color: #aaa;
+}
+
+#fps {
+  font-size: 11px;
+  color: #666;
+  white-space: nowrap;
+}
+
+#ctrl-camera {
+  background: rgba(255, 255, 255, 0.1);
+  color: #eee;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 13px;
+  max-width: 220px;
+}
+
+#ctrl-scale-val {
+  font-size: 12px;
+  color: #888;
+  min-width: 84px;
+}
+
+#ui-toggle,
+#ui-show {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: #ccc;
+  border-radius: 5px;
+  width: 26px;
+  height: 26px;
+  cursor: pointer;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s;
+  flex-shrink: 0;
+}
+
+#ui-toggle:hover,
+#ui-show:hover {
+  background: rgba(85, 170, 255, 0.3);
+  border-color: #5af;
+  color: #5af;
+}
+
+#ui-show {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+}
+
+input[type="range"] {
+  width: 120px;
+  accent-color: #5af;
+}
+
+input[type="color"] {
+  width: 30px;
+  height: 22px;
+  border: none;
+  border-radius: 3px;
+  padding: 0;
+  cursor: pointer;
+  background: none;
+}
