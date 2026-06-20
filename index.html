@@ -22,6 +22,7 @@
           <select id="ctrl-mode">
             <option value="capture">キャプチャ協力</option>
             <option value="realtime">リアルタイム重なり</option>
+            <option value="hands">手の重なり物理</option>
           </select>
         </div>
         <div class="tool-group">
@@ -79,6 +80,8 @@
   <!-- node_modules は gitignore 済み。TFJS / BodyPix は CDN から読み込む -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.2.1/dist/body-pix.min.umd.js"></script>
+  <!-- 「手の重なり物理」モードの物理エンジン -->
+  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
   <script type="module" src="src/app.js"></script>
 </body>
 </html>

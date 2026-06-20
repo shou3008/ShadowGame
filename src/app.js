@@ -9,6 +9,7 @@ import { Renderer }    from './renderer.js';
 import { Game }        from './game.js';
 import { OverlapGame } from './overlap-game.js';
 import { OverlapField } from './overlap.js';
+import { HandsGame }   from './hands-game.js';
 
 const video    = document.getElementById('video');
 const canvas   = document.getElementById('canvas');
@@ -54,6 +55,21 @@ const INFERENCE_CONFIG = {
   // 白い服など「背景との差が小さく確信度が下がる」画素を拾えるよう低めに設定。
   //   下げるほど欠けにくくなるが、背景ノイズも混ざりやすくなる(0.2〜0.3 が目安)。
   segmentationThreshold: 0.2,
+};
+
+// 「手の重なり物理」モード用の推論設定。
+//   キーポイント(手首)だけを使うので segmentation 精度より「多人数の姿勢を確実に取る」
+//   ことを優先する。★要件1: scoreThreshold を高め(0.70)にして、ソファ・クッション等の
+//   確度の低い誤検出ポーズを棄却する。手首の個別スコアは hands-game.js 側でも 0.70 で
+//   再フィルタしている(二段構え)。
+//   ※ 本物の人まで落ちてしまう場合は 0.5 程度まで下げてよい。
+const HANDS_CONFIG = {
+  flipHorizontal:        false,
+  internalResolution:    'medium',
+  segmentationThreshold: 0.5,
+  maxDetections:         4,      // 最大4人まで姿勢検出(上位2人を A/B に使う)
+  scoreThreshold:        0.70,   // ★要件1: 確度の低い検出(背景ノイズ)を棄却
+  nmsRadius:             20,
 };
 
 // --- UI controls ---
@@ -112,11 +128,15 @@ async function main() {
   const game     = new Game(gameCanvas);
   const overlapGame  = new OverlapGame(gameCanvas);
   const overlapField = new OverlapField();
+  const handsGame    = new HandsGame(gameCanvas);
 
-  // 'capture' = ポーズ→キャプチャ→実行(固定シルエット)
+  // 'capture'  = ポーズ→キャプチャ→実行(固定シルエット)
   // 'realtime' = 複数人がリアルタイムに動き、影の重なりを当たり判定にして遊ぶ
+  // 'hands'    = 2人の手首が重なった位置に Matter.js コライダーを作り落下物を受け止める
   let mode = ctrlMode ? ctrlMode.value : 'capture';
-  const activeGame = () => (mode === 'realtime' ? overlapGame : game);
+  const activeGame = () =>
+    mode === 'realtime' ? overlapGame :
+    mode === 'hands'    ? handsGame   : game;
 
   function fitCanvas() {
     const aspect = camera.width / camera.height;
@@ -219,8 +239,9 @@ async function main() {
 
   // --- ゲーム操作 ---
   gameStartBtn.addEventListener('click', () => {
-    if (mode === 'realtime') overlapGame.reset(); // 並行モードはフェーズ無し → 仕切り直し
-    else                     game.start();
+    // capture 以外(realtime/hands)はフェーズ無し → スタートは仕切り直し
+    if (mode === 'capture') game.start();
+    else                    activeGame().reset();
   });
   gameResetBtn.addEventListener('click', () => { activeGame().reset(); });
 
@@ -229,11 +250,19 @@ async function main() {
     mode = ctrlMode.value;
     game.reset();
     overlapGame.reset();
+    handsGame.reset();
     // 旧モードの描画を消す（次フレームで現モードが描き直す）
     gameCanvas.getContext('2d').clearRect(0, 0, gameCanvas.width, gameCanvas.height);
   });
 
   function updateGameHud() {
+    if (mode === 'hands') {
+      // HUD はゲーム本体(HandsGame.draw)が描くので、結果パネルは隠すだけ
+      gameTimerEl.textContent  = '--';
+      gameRemainEl.textContent = `受け止めた: ${handsGame.caught}`;
+      gameResultEl.hidden = true;
+      return;
+    }
     if (mode === 'realtime') {
       gameTimerEl.textContent  = '--';
       gameRemainEl.textContent = '2人で影を重ねてボールを運ぼう';
@@ -291,15 +320,18 @@ async function main() {
     updateGameHud();
 
     // capture: ライブ表示が要るフェーズ(idle/構え)のみ推論。RUN/結果中は固定。
-    // realtime: みんなが動き続けるので常に推論する。
-    const needInfer = mode === 'realtime' ? true : game.live;
+    // realtime/hands: みんなが動き続けるので常に推論する。
+    const needInfer = (mode === 'realtime' || mode === 'hands') ? true : game.live;
     if (needInfer && camera.ready && !processing && !paused) {
       processing = true;
+
+      // hands モードは背景ノイズ排除のため厳格な HANDS_CONFIG(scoreThreshold 0.70)を使う
+      const inferConfig = mode === 'hands' ? HANDS_CONFIG : INFERENCE_CONFIG;
 
       // 人物セグメンテーション (全員分を 1 枚の二値マスクに統合)
       //   返り値: SemanticPersonSegmentation — { data: Uint8Array, width, height, allPoses }
       //   data[i] は その画素が人なら 1、そうでなければ 0
-      net.segmentPerson(camera.element, INFERENCE_CONFIG).then(seg => {
+      net.segmentPerson(camera.element, inferConfig).then(seg => {
         if (seg && seg.data) {
           const w = seg.width, h = seg.height;
           const N = w * h;
@@ -325,6 +357,9 @@ async function main() {
             // 複数人の骨格から「影が重なったセル」を求め、当たり判定に渡す
             const field = overlapField.process(smBody, seg.allPoses, w, h, config.mirror);
             overlapGame.setMask(field.solid, field.gw, field.gh);
+          } else if (mode === 'hands') {
+            // 手首キーポイントだけを渡す。重なり判定と Matter 物理は hands-game.js 側で実行
+            handsGame.setPoses(seg.allPoses, w, h, config.mirror);
           } else {
             // ゲームの当たり判定用に最新マスク(連続値 smBody)を渡す
             game.setMask(smBody, w, h);
