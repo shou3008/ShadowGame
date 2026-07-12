@@ -80,18 +80,22 @@ GAME OVER 後に **スタート** を押すと、そのステージから再挑�
 index.html      画面・ツールバー・CDN 読み込み
 style.css       スタイル
 src/
-  camera.js     Web カメラの取得（getUserMedia ラッパ）
-  app.js        メインループ（BodyPix 推論・マスク平滑化・モード切替・統括）
+  app.js        起点。カメラ→推論→描画→ゲームを繋ぐだけ（ロジックは持たない）
+  settings.js   調整値の集約（EMA・カメラ解像度・BodyPix / 推論設定）
+  ui.js         DOM 参照・ツールバー配線・HUD 表示
+  camera.js     Web カメラの取得（getUserMedia ラッパ・使えるカメラの自動選択）
+  mask.js       人物マスクの時間平滑化（連続値 + 描画用 canvas への書き出し）
   renderer.js   WebGL2 でシルエットをモザイク描画
   game.js          キャプチャ協力モード（ステージ・物理・当たり判定・描画）
   overlap.js       リアルタイム重なりモードの場計算（骨格カプセルの交差）
   overlap-game.js  リアルタイム重なりモードのゲーム本体（物理・描画）
+  hands-game.js    手の重なり物理モード（手首コライダー・落下物・HUD）
 ```
 
 ### 処理の流れ
 
 1. `app.js` が毎フレーム BodyPix で人物セグメンテーションを実行
-2. 結果の人物マスクを EMA で時間平滑化（`smBody`）
+2. `mask.js` が人物マスクを EMA で時間平滑化（`SilhouetteMask.smooth`）
 3. `renderer.js` がマスクを WebGL でモザイク影として描画
 4. `game.js` が同じマスクを当たり判定に使い、ボールの物理を更新してオーバーレイに描画
 
@@ -101,11 +105,21 @@ src/
 
 ## 調整ポイント
 
-- **人物抽出の精度/速度**: `src/app.js` の `INFERENCE_CONFIG`
+影の見え方・認識精度に関わる値は `src/settings.js` に集約しています。
+
+- **人物抽出の精度/速度**: `INFERENCE_CONFIG`
   （`internalResolution` を上げると細部に強いが重い／`segmentationThreshold` を下げると太る）
-- **影の追従・残像**: `src/app.js` の `ALPHA_RISE` / `ALPHA_FALL`
+- **影の追従・残像**: `ALPHA_RISE` / `ALPHA_FALL`
+- **モデルの重さ**: `MODEL_CONFIG`（重いときは `MobileNetV1` + `multiplier: 0.75` まで落とせる）
 - **ゲーム物理・ステージ**: `src/game.js` 冒頭の定数と `STAGES` 配列
   （重力 `gravity`、ジャンプ力 `shadowPush`、足場 `platforms`、ゴール `goal` など）
+
+### カメラが選ばれない/映らないとき
+
+OBS・Iriun などの**仮想カメラ**がブラウザの既定デバイスになっていると、その本体アプリが
+起動していない場合に `NotReadableError`（映像ソースを開始できない）で失敗します。
+`camera.js` の `startAuto()` は実カメラを仮想カメラより優先して順に試すので通常は問題ありませんが、
+明示的に選びたい場合はツールバーの「カメラ」から選択してください（選択内容は次回も引き継がれます）。
 
 ---
 
