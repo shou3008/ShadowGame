@@ -3,56 +3,51 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>シルエット投影</title>
+  <title>影リフティング（重力の官能評価）</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div id="app">
     <canvas id="canvas"></canvas>
     <canvas id="game"></canvas>
-    <div id="game-result" hidden>
-      <div class="result-title" id="result-title">CLEAR!</div>
-      <div class="result-time" id="result-time">--</div>
-      <div class="result-hint" id="result-hint">「スタート」でもう一度</div>
-    </div>
     <div id="ui">
       <div id="toolbar">
         <div class="tool-group">
-          <label for="ctrl-mode">モード</label>
-          <select id="ctrl-mode">
-            <option value="capture">キャプチャ協力</option>
-            <option value="realtime">リアルタイム重なり</option>
-            <option value="hands">手の重なり物理</option>
-          </select>
+          <label for="ctrl-pid">参加者ID</label>
+          <input type="text" id="ctrl-pid" size="6" placeholder="P01">
+        </div>
+        <div class="tool-group">
+          <button id="btn-next" class="game-btn primary">開始</button>
+          <button id="btn-abort" class="game-btn" disabled>中止</button>
+          <span id="hud-progress">— / —</span>
+        </div>
+        <div class="tool-group">
+          <button id="btn-export-trials" class="game-btn">CSV(試行)</button>
+          <button id="btn-export-events" class="game-btn">CSV(イベント)</button>
         </div>
         <div class="tool-group">
           <label for="ctrl-camera">カメラ</label>
           <select id="ctrl-camera"><option>読み込み中...</option></select>
-        </div>
-        <div class="tool-group">
+          <label for="ctrl-quality">品質</label>
+          <select id="ctrl-quality">
+            <option value="ultrafast">最速</option>
+            <option value="fast" selected>速度優先</option>
+            <option value="balanced">バランス</option>
+            <option value="accurate">精度優先</option>
+          </select>
           <label class="check"><input type="checkbox" id="ctrl-flip" checked>左右反転</label>
         </div>
         <div class="tool-group">
           <label for="ctrl-scale">解像度</label>
           <input type="range" id="ctrl-scale" min="10" max="100" step="5" value="100">
           <span id="ctrl-scale-val">-- px</span>
-        </div>
-        <div class="tool-group">
           <label for="ctrl-cell">間隔</label>
           <input type="range" id="ctrl-cell" min="6" max="60" step="1" value="18">
           <span id="ctrl-cell-val">18px</span>
-        </div>
-        <div class="tool-group">
           <label for="ctrl-fg">影</label>
           <input type="color" id="ctrl-fg" value="#000000">
           <label for="ctrl-bg">背景</label>
           <input type="color" id="ctrl-bg" value="#ffffff">
-        </div>
-        <div class="tool-group">
-          <button id="game-start" class="game-btn">スタート</button>
-          <button id="game-reset" class="game-btn">リセット</button>
-          <span id="game-timer">0.0s</span>
-          <span id="game-remain">残り --</span>
         </div>
         <div class="tool-group spacer">
           <span id="status">初期化中...</span>
@@ -77,11 +72,9 @@
   </div>
   <video id="video" autoplay playsinline></video>
 
-  <!-- node_modules は gitignore 済み。TFJS / BodyPix は CDN から読み込む -->
+  <!-- node_modules は使わない。TFJS / BodyPix は CDN から読み込む -->
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/body-pix@2.2.1/dist/body-pix.min.umd.js"></script>
-  <!-- 「手の重なり物理」モードの物理エンジン -->
-  <script src="https://cdn.jsdelivr.net/npm/matter-js@0.20.0/build/matter.min.js"></script>
   <script type="module" src="src/app.js"></script>
 </body>
 </html>

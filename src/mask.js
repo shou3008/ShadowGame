@@ -9,6 +9,7 @@ export class SilhouetteMask {
   #ctx;
   #smooth = null; // Float32Array (0..1)
   #rgba   = null; // Uint8ClampedArray (書き出しバッファ)
+  #image  = null; // ImageData (rgba を参照。使い回す)
 
   constructor() {
     this.#ctx = this.#canvas.getContext('2d', { willReadFrequently: false });
@@ -23,6 +24,7 @@ export class SilhouetteMask {
     this.#canvas.height = height;
     this.#smooth = null;
     this.#rgba   = null;
+    this.#image  = null;
   }
 
   // seg: BodyPix の SemanticPersonSegmentation ({ data, width, height })
@@ -34,13 +36,16 @@ export class SilhouetteMask {
     if (!this.#smooth || this.#smooth.length !== n) {
       this.#smooth = new Float32Array(n);
       this.#rgba   = new Uint8ClampedArray(n * 4);
+      this.#image  = new ImageData(this.#rgba, w, h);   // 使い回す(毎回確保するとゴミが出る)
     }
     const smooth = this.#smooth;
     const rgba   = this.#rgba;
 
     for (let i = 0; i < n; i++) {
       const curr  = data[i] ? 1 : 0;
-      const alpha = curr > smooth[i] ? ALPHA_RISE : ALPHA_FALL; // 出現は速く、消失も速く
+      // 対称 EMA。非対称にすると「進む影」と「退く影」で dO/dt に方向バイアスが乗り、
+      // 跳ね返りが左右非対称になる(実験装置としては許容できない)。
+      const alpha = curr > smooth[i] ? ALPHA_RISE : ALPHA_FALL;
       smooth[i] += alpha * (curr - smooth[i]);
       rgba[i * 4 + 3] = smooth[i] * 255;
     }
@@ -49,6 +54,6 @@ export class SilhouetteMask {
       this.#canvas.width  = w;
       this.#canvas.height = h;
     }
-    this.#ctx.putImageData(new ImageData(rgba, w, h), 0, 0);
+    this.#ctx.putImageData(this.#image, 0, 0);
   }
 }

@@ -1,26 +1,26 @@
-// DOM 参照・ツールバーの配線・HUD 表示をまとめる。
-// ゲームロジックや推論はここに置かない(app.js が両者を繋ぐ)。
+// DOM 参照・ツールバーの配線・ステータス表示。
+// ★重力値をここへ持ち込んではいけない(盲検)。Session が公開していないので、そもそも取れない。
 
 const $ = (id) => document.getElementById(id);
 
 export const els = {
   video:      $('video'),
   canvas:     $('canvas'),      // シルエット(WebGL)
-  gameCanvas: $('game'),        // ゲームのオーバーレイ(2D)
+  gameCanvas: $('game'),        // ゲームとHUDのオーバーレイ(2D)
   status:     $('status'),
   fps:        $('fps'),
+  toolbar:    $('toolbar'),
+  uiShow:     $('ui-show'),
 
-  gameStart:   $('game-start'),
-  gameReset:   $('game-reset'),
-  gameTimer:   $('game-timer'),
-  gameRemain:  $('game-remain'),
-  result:      $('game-result'),
-  resultTitle: $('result-title'),
-  resultTime:  $('result-time'),
-  resultHint:  $('result-hint'),
+  pid:          $('ctrl-pid'),
+  next:         $('btn-next'),
+  abort:        $('btn-abort'),
+  progress:     $('hud-progress'),
+  exportTrials: $('btn-export-trials'),
+  exportEvents: $('btn-export-events'),
 
-  mode:     $('ctrl-mode'),
   camera:   $('ctrl-camera'),
+  quality:  $('ctrl-quality'),
   flip:     $('ctrl-flip'),
   scale:    $('ctrl-scale'),
   scaleVal: $('ctrl-scale-val'),
@@ -39,7 +39,7 @@ function hexToVec4(hex) {
   ]);
 }
 
-// Renderer にそのまま渡す描画設定。ツールバーを操作するとここが書き換わる。
+// Renderer にそのまま渡す描画設定
 export const config = {
   fgColor:    hexToVec4(els.fg.value),
   bgColor:    hexToVec4(els.bg.value),
@@ -48,8 +48,6 @@ export const config = {
   cellSize:   parseInt(els.cell.value),
 };
 
-// 見た目のツールバーを config に繋ぐ。
-// onScaleChange は解像度スライダー操作時に canvas を張り直すためのフック。
 export function bindAppearanceControls(onScaleChange) {
   els.fg.addEventListener('input',    () => { config.fgColor = hexToVec4(els.fg.value); });
   els.bg.addEventListener('input',    () => { config.bgColor = hexToVec4(els.bg.value); });
@@ -64,73 +62,53 @@ export function bindAppearanceControls(onScaleChange) {
   });
 }
 
+export function bindSession({ onNext, onAbort, onExportTrials, onExportEvents }) {
+  els.next.addEventListener('click', onNext);
+  els.abort.addEventListener('click', onAbort);
+  els.exportTrials.addEventListener('click', onExportTrials);
+  els.exportEvents.addEventListener('click', onExportEvents);
+}
+
+// 試行中に見え方や操作の対応づけが変わると剰余変数になる。
+// cellSize/pixelScale は被験者の見え方を、mirror は操作の左右対応を変えてしまう。
+const LOCKED = ['pid', 'camera', 'quality', 'flip', 'scale', 'cell', 'fg', 'bg'];
+
+export function lockControls(locked) {
+  for (const k of LOCKED) els[k].disabled = locked;
+  els.abort.disabled = !locked;
+  els.next.disabled  = locked;
+}
+
+// 試行中はツールバーを隠す(被験者の視界から実験者用UIを外す)
+export function setToolbarVisible(visible) {
+  els.toolbar.hidden = !visible;
+  els.uiShow.hidden  = visible;
+}
+
+export function updateSessionUi(session) {
+  els.next.textContent     = session.nextLabel;
+  els.progress.textContent = session.progress;
+}
+
 export const setStatus     = (text) => { els.status.textContent = text; };
-export const setFps        = (fps)  => { els.fps.textContent = fps + ' fps'; };
 export const setRenderSize = (w, h) => { els.scaleVal.textContent = `${w}×${h}px`; };
 
-// カメラ選択プルダウンを作り直す
-export function renderCameraOptions(cams, currentId) {
-  els.camera.innerHTML = '';
-  cams.forEach((cam, i) => {
-    const opt = document.createElement('option');
-    opt.value = cam.deviceId;
-    opt.textContent = cam.label || `カメラ ${i + 1}`;
-    if (cam.deviceId === currentId) opt.selected = true;
-    els.camera.appendChild(opt);
-  });
-}
+// 影が体に追いつくかは推論fps で決まる(描画fps ではない)。
+//   renderFps … 描画回数。マスクが古くても同じ影を描き直すので常に 60 出る。追従性の指標ではない。
+//   inferFps  … 影が実際に更新された回数。こちらが追従性を決める。
+export const setFps = (renderFps, inferFps, inferMs, maskMs) => {
+  els.fps.textContent =
+    `${renderFps} fps / 推論 ${inferFps} (推論 ${inferMs.toFixed(0)}ms・マスク ${maskMs.toFixed(1)}ms)`;
+};
 
-function showResult({ title, time, hint, gameOver = false }) {
-  els.resultTitle.textContent = title;
-  els.resultTime.textContent  = time;
-  els.resultHint.textContent  = hint;
-  els.result.classList.toggle('gameover', gameOver);
-  els.result.hidden = false;
-}
-
-const hideResult = () => { els.result.hidden = true; };
-
-// モードごとにタイマー・進捗・結果パネルを更新する
-export function updateHud(mode, { game, overlapGame, handsGame }) {
-  if (mode === 'hands') {
-    // 詳しい HUD は HandsGame.draw が canvas に描くので、ここは結果パネルを隠すだけ
-    els.gameTimer.textContent  = '--';
-    els.gameRemain.textContent = `受け止めた: ${handsGame.caught}`;
-    hideResult();
-    return;
-  }
-
-  if (mode === 'realtime') {
-    els.gameTimer.textContent  = '--';
-    els.gameRemain.textContent = '2人で影を重ねてボールを運ぼう';
-    if (overlapGame.won) {
-      showResult({ title: 'CLEAR!', time: 'ゴール達成！', hint: '「スタート」でもう一度' });
-    } else {
-      hideResult();
-    }
-    return;
-  }
-
-  // capture モード
-  const phaseLabel = game.phase === 'pose' ? '（構え中）'
-                   : game.phase === 'run'  ? '（実行中）' : '';
-  els.gameTimer.textContent  = (game.timeMs / 1000).toFixed(1) + 's';
-  els.gameRemain.textContent = `STAGE ${game.stageIndex + 1}/${game.stageCount}${phaseLabel}`;
-
-  if (game.won) {
-    showResult({
-      title: 'ALL CLEAR!',
-      time:  (game.timeMs / 1000).toFixed(1) + ' 秒',
-      hint:  '「スタート」でもう一度',
-    });
-  } else if (game.gameOver) {
-    showResult({
-      title:    'GAME OVER',
-      time:     '落下！',
-      hint:     '「スタート」で再挑戦（もう一度ポーズから）',
-      gameOver: true,
-    });
+// backend が cpu だと推論が桁違いに遅くなる。実験前に必ず気づけるよう目立たせる。
+export function setBackendBanner(backend) {
+  const ok = backend === 'webgl';
+  if (ok) {
+    els.status.textContent = '準備完了';
+    els.status.className = '';
   } else {
-    hideResult();
+    els.status.textContent = `⚠ TF backend が "${backend}" — 推論が遅すぎて実験に使えません`;
+    els.status.className = 'banner-error';
   }
 }

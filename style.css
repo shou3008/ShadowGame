@@ -36,35 +36,40 @@ body {
   z-index: 5;
 }
 
-/* クリア表示 */
-#game-result {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 8;
-  text-align: center;
-  pointer-events: none;
-  background: rgba(0, 0, 0, 0.55);
-  padding: 28px 56px;
-  border-radius: 16px;
-  border: 2px solid rgba(90, 240, 138, 0.7);
+/* 参加者ID */
+#ctrl-pid {
+  background: #1c1c1c;
+  border: 1px solid #444;
+  color: #eee;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 13px;
 }
-#game-result[hidden] { display: none; }
-.result-title {
-  font-size: 56px;
-  font-weight: 800;
+
+/* backend が cpu のときの警告。実験を止めるために目立たせる。 */
+#status.banner-error {
+  color: #fff;
+  background: #c0392b;
+  padding: 3px 10px;
+  border-radius: 4px;
+  font-weight: 700;
+}
+
+#hud-progress {
+  font-size: 13px;
   color: #5af08a;
-  letter-spacing: 2px;
+  font-variant-numeric: tabular-nums;
+  min-width: 64px;
 }
-#game-result.gameover {
-  border-color: rgba(255, 90, 90, 0.8);
+
+.game-btn.primary {
+  background: rgba(90, 240, 138, 0.4);
+  font-weight: 700;
 }
-#game-result.gameover .result-title {
-  color: #ff6464;
+.game-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
 }
-.result-time { font-size: 32px; margin-top: 6px; color: #fff; }
-.result-hint { font-size: 14px; margin-top: 10px; color: #aaa; }
 
 .game-btn {
   background: rgba(90, 240, 138, 0.18);
@@ -77,8 +82,6 @@ body {
   transition: background 0.15s;
 }
 .game-btn:hover { background: rgba(90, 240, 138, 0.35); }
-#game-timer { font-size: 14px; color: #5af08a; min-width: 52px; font-variant-numeric: tabular-nums; }
-#game-remain { font-size: 13px; color: #ccc; }
 
 #ui {
   position: absolute;
