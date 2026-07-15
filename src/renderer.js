@@ -1,8 +1,12 @@
 // シンプル化したレンダラ:
-//   - BodyPix の人物マスクを JS 側で 体の所属度の連続値 (A チャンネル, 0..255)
-//     に圧縮してから渡す
+//   - BodyPix の人物マスクを JS 側で 体の所属度の連続値 (0..255 の単一チャンネル)
+//     に圧縮してから渡す。R8 テクスチャとして直接アップロードする
+//     (RGBA の 1/4 のデータ量。2D canvas / putImageData 経由のコピーも無い)
 //   - シェーダは 1 パスのみ。クロージング系の前処理は無し
 //     (時間平滑化は JS 側 EMA で、空間平滑化はセル内 3x3 平均で吸収)
+//   - 呼び出し側(app.js)は「マスクか外観設定が変わったときだけ」render を呼ぶ。
+//     マスクは推論レート(~10-20fps)でしか変わらないので、60fps で描き直すのは
+//     GPU の無駄で、同じ GPU を使う TFJS 推論を遅くする。
 
 const VERT = `#version 300 es
 layout(location=0) in vec2 a_pos;
@@ -18,7 +22,7 @@ void main() {
 }`;
 
 // グリッドモザイク (シルエットのみ)
-//   u_tex: RGBA 入力。A=body 所属度 (連続 0..1)
+//   u_tex: R8 入力。R=body 所属度 (連続 0..1)
 //   - セル内 3x3 を平均してカバレッジを取得し閾値判定する。
 //     連続値を空間平均することで、セル単位のチカチカ(きもさ)を抑える。
 const MOSAIC_FRAG = `#version 300 es
@@ -40,7 +44,7 @@ void main() {
   for (int yy = -1; yy <= 1; yy++) {
     for (int xx = -1; xx <= 1; xx++) {
       vec2 off = vec2(float(xx), float(yy)) * (u_cell / 3.0);
-      bodyCov += texture(u_tex, (center + off) / u_res).a;
+      bodyCov += texture(u_tex, (center + off) / u_res).r;
     }
   }
   bodyCov /= 9.0;
@@ -49,9 +53,12 @@ void main() {
   fragColor = bodyCov < 0.28 ? u_bg : u_fg;
 }`;
 
+const UNIFORMS = ['u_flipX', 'u_flipY', 'u_res', 'u_cell', 'u_fg', 'u_bg'];
+
 export class Renderer {
   #gl;
   #mosaicProg;
+  #loc = {};       // uniform location のキャッシュ(毎フレーム引かない)
   #vao;
   #maskTex;
   #w = 0; #h = 0;
@@ -62,8 +69,14 @@ export class Renderer {
     this.#gl = gl;
 
     this.#mosaicProg = this.#buildProgram(VERT, MOSAIC_FRAG);
-    this.#vao        = this.#buildQuad();
-    this.#maskTex    = this.#makeTex(gl.NEAREST);
+    for (const name of UNIFORMS) {
+      this.#loc[name] = gl.getUniformLocation(this.#mosaicProg, name);
+    }
+    this.#vao     = this.#buildQuad();
+    this.#maskTex = this.#makeTex(gl.NEAREST);
+
+    // R8 は幅が 4 の倍数とは限らないので、行アラインメントを 1 byte にしておく
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
   }
 
   resize(w, h) {
@@ -74,16 +87,17 @@ export class Renderer {
     gl.canvas.height = h;
   }
 
-  render(maskImage, {
+  // alpha: Uint8Array (0..255, maskW*maskH)。SilhouetteMask.alpha をそのまま渡す。
+  render(alpha, maskW, maskH, {
     fgColor, bgColor,
     mirror = true, cellSize = 18,
   }) {
     const gl = this.#gl;
     const W = this.#w, H = this.#h;
 
-    // マスクをアップロード
+    // マスクをアップロード (単一チャンネル)
     gl.bindTexture(gl.TEXTURE_2D, this.#maskTex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, maskImage);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R8, maskW, maskH, 0, gl.RED, gl.UNSIGNED_BYTE, alpha);
 
     // 描画
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -93,14 +107,13 @@ export class Renderer {
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.#maskTex);
 
-    const prog = this.#mosaicProg;
-    const loc = name => gl.getUniformLocation(prog, name);
-    gl.uniform1i(loc('u_flipX'), mirror ? 1 : 0);
-    gl.uniform1i(loc('u_flipY'), 0);
-    gl.uniform2f(loc('u_res'),   W, H);
-    gl.uniform1f(loc('u_cell'),  Math.max(2, cellSize));
-    gl.uniform4fv(loc('u_fg'),   fgColor);
-    gl.uniform4fv(loc('u_bg'),   bgColor);
+    const loc = this.#loc;
+    gl.uniform1i(loc.u_flipX, mirror ? 1 : 0);
+    gl.uniform1i(loc.u_flipY, 0);
+    gl.uniform2f(loc.u_res,   W, H);
+    gl.uniform1f(loc.u_cell,  Math.max(2, cellSize));
+    gl.uniform4fv(loc.u_fg,   fgColor);
+    gl.uniform4fv(loc.u_bg,   bgColor);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
   }

@@ -44,6 +44,14 @@ export class LiftingGame {
   #maxSpeed = 0; #maxEnergy = 0;
   #hitImpulseSum = 0; #hitAgeSum = 0; #hitAgeCount = 0;
 
+  // 行動指標(主観評価との対応づけ用)。すべてストリーミング集計(配列を持たない)。
+  #firstHitMs = -1;                       // 最初の打点までの時間(構え/様子見)
+  #lastHitMs  = -1;                       // 打点間隔用。ドロップでリセット(ラリー内のみ)
+  #ivSum = 0; #iv2Sum = 0; #ivCount = 0;  // 打点間隔 = 課題のテンポ
+  #hitHSum = 0; #hitH2Sum = 0;            // 打点高さ(床基準) = どこで迎え撃つか
+  #hitXSum = 0; #hitX2Sum = 0;            // 打点の横散らばり = 追い回され具合
+  #apexSum = 0;                           // 打ち上げ頂点高さ = 強打/ちょん当ての別
+
   #flashMs = 0;      // 打撃時のエフェクト
 
   constructor(overlayCanvas) {
@@ -68,6 +76,11 @@ export class LiftingGame {
     this.#sumDt = 0; this.#sumSpeedDt = 0; this.#sumEnergyDt = 0;
     this.#maxSpeed = 0; this.#maxEnergy = 0;
     this.#hitImpulseSum = 0; this.#hitAgeSum = 0; this.#hitAgeCount = 0;
+    this.#firstHitMs = -1; this.#lastHitMs = -1;
+    this.#ivSum = 0; this.#iv2Sum = 0; this.#ivCount = 0;
+    this.#hitHSum = 0; this.#hitH2Sum = 0;
+    this.#hitXSum = 0; this.#hitX2Sum = 0;
+    this.#apexSum = 0;
     this.#flashMs = 0;
 
     this.#spawn();
@@ -246,6 +259,26 @@ export class LiftingGame {
     this.#flashMs = 160;
 
     const b = this.#ball;
+
+    // --- 行動指標 ---
+    if (this.#firstHitMs < 0) this.#firstHitMs = this.#activeMs;
+    // 打点間隔はラリー内(直前にドロップを挟まない連続打)のみ。再投入待ちを跨ぐと
+    // テンポの指標として意味を持たない。
+    if (this.#lastHitMs >= 0) {
+      const iv = this.#activeMs - this.#lastHitMs;
+      this.#ivSum += iv; this.#iv2Sum += iv * iv; this.#ivCount++;
+    }
+    this.#lastHitMs = this.#activeMs;
+
+    const hh = FLOOR_Y - b.y;               // 打点高さ(床基準)
+    this.#hitHSum += hh; this.#hitH2Sum += hh * hh;
+    this.#hitXSum += b.x; this.#hitX2Sum += b.x * b.x;
+    // 反射直後の vy から放物線の頂点高さを見積もる(上向きでなければ打点高さのまま)
+    const apex = b.vy < 0 && this.#gravity > 0
+      ? hh + (b.vy * b.vy) / (2 * this.#gravity)
+      : hh;
+    this.#apexSum += apex;
+
     this.#emit('hit', {
       ball_x: b.x.toFixed(1), ball_y: b.y.toFixed(1),
       vx_in: vx0.toFixed(1), vy_in: vy0.toFixed(1),
@@ -266,6 +299,7 @@ export class LiftingGame {
     this.#rallies.push(this.#rally);
     this.#emit('drop', { drop_reason: reason, rally_at_event: this.#rally });
     this.#rally = 0;
+    this.#lastHitMs = -1;   // 打点間隔はラリー内のみで集計する
 
     this.#frozen  = true;
     this.#freezeMs = EXPERIMENT.respawnDelayMs;
@@ -290,6 +324,15 @@ export class LiftingGame {
   get stats() {
     const n = this.#sumDt || 1;
     const r = this.#rallies;
+    // ストリーミング分散: sd = sqrt(E[x²] − E[x]²)。丸め誤差で負に振れたら 0 に潰す
+    const sd = (sum, sum2, cnt) => {
+      if (cnt < 2) return NaN;
+      const m = sum / cnt;
+      return Math.sqrt(Math.max(0, sum2 / cnt - m * m));
+    };
+    const ivMean = this.#ivCount ? this.#ivSum / this.#ivCount : NaN;
+    const ivSd   = sd(this.#ivSum, this.#iv2Sum, this.#ivCount);
+    const fmt = (v, digits) => Number.isFinite(v) ? v.toFixed(digits) : '';
     return {
       hit_count:   this.#hits,
       drop_count:  this.#drops,
@@ -308,6 +351,17 @@ export class LiftingGame {
       mean_hit_infer_age_ms: this.#hitAgeCount
         ? (this.#hitAgeSum / this.#hitAgeCount).toFixed(1) : '',
       clamp_hits: this.#clampHits,
+
+      // --- 行動指標(主観評価との対応づけ用) ---
+      time_to_first_hit_ms: this.#firstHitMs < 0 ? '' : Math.round(this.#firstHitMs),
+      hit_interval_mean_ms: fmt(ivMean, 0),                    // 課題のテンポ
+      hit_interval_cv:      fmt(ivSd / ivMean, 3),             // テンポの乱れ(変動係数)
+      hit_height_mean_px:   this.#hits
+        ? (this.#hitHSum / this.#hits).toFixed(1) : '',        // 迎撃高さ(床基準)
+      hit_height_sd_px:     fmt(sd(this.#hitHSum, this.#hitH2Sum, this.#hits), 1),
+      hit_x_sd_px:          fmt(sd(this.#hitXSum, this.#hitX2Sum, this.#hits), 1),  // 横の追い回され
+      hit_apex_mean_px:     this.#hits
+        ? (this.#apexSum / this.#hits).toFixed(1) : '',        // 打ち上げの高さ(強打/ちょん当て)
     };
   }
 

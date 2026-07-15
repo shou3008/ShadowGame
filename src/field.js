@@ -34,6 +34,9 @@ export class OccupancyField {
   #tPrev = -1;
   #mw = 0; #mh = 0; #mirror = null;
   #coverage = 0;
+  #centroidX = NaN; // 占有率の重心 (world px)。体の位置の指標
+  #centroidY = NaN;
+  #motion = 0;      // 平均 |∂O/∂t| [1/s]。体の動きの激しさの指標
 
   constructor() {
     const n = this.#gw * this.#gh;
@@ -52,10 +55,18 @@ export class OccupancyField {
   get coverage() { return this.#coverage; }  // O>0.5 のセル比。フレーミングのサニティチェック
   get ready()    { return this.#tCurr >= 0; }
 
+  // ログ用の行動指標。重心の移動距離は「移動量」、motion は手足を含む「動きの激しさ」。
+  // (重心は腕を左右対称に振っても動かないので、両方を取る)
+  get centroidX() { return this.#centroidX; }   // world px。人がいなければ NaN
+  get centroidY() { return this.#centroidY; }
+  get motion()    { return this.#motion; }      // グリッド平均 |∂O/∂t| [1/s]
+
   reset() {
     this.#curr.fill(0); this.#prev.fill(0); this.#rate.fill(0);
     this.#tCurr = -1; this.#tPrev = -1;
     this.#coverage = 0;
+    this.#centroidX = NaN; this.#centroidY = NaN;
+    this.#motion = 0;
   }
 
   // マスク座標 → グリッド座標の対応表。mirror はここで焼き込むので、
@@ -125,7 +136,7 @@ export class OccupancyField {
     this.#finish(this.#gw * this.#gh);
   }
 
-  // dO/dt と coverage を確定させる
+  // dO/dt・coverage・重心・motion を確定させる
   #finish(n) {
     const curr = this.#curr, prev = this.#prev, rate = this.#rate;
     const dt = this.#tCurr - this.#tPrev;
@@ -136,9 +147,29 @@ export class OccupancyField {
       rate.fill(0);
     }
 
-    let solid = 0;
-    for (let i = 0; i < n; i++) if (curr[i] > 0.5) solid++;
+    const gw = this.#gw, gh = this.#gh;
+    let solid = 0, wsum = 0, sx = 0, sy = 0, mabs = 0;
+    for (let y = 0; y < gh; y++) {
+      const row = y * gw;
+      const cy = (y + 0.5) * this.#cellH;
+      for (let x = 0; x < gw; x++) {
+        const o = curr[row + x];
+        if (o > 0.5) solid++;
+        wsum += o;
+        sx += o * (x + 0.5) * this.#cellW;
+        sy += o * cy;
+        mabs += Math.abs(rate[row + x]);
+      }
+    }
     this.#coverage = solid / n;
+    this.#motion   = mabs / n;
+    if (wsum > 1e-6) {
+      this.#centroidX = sx / wsum;
+      this.#centroidY = sy / wsum;
+    } else {
+      this.#centroidX = NaN;
+      this.#centroidY = NaN;
+    }
   }
 
   // 3-tap ボックスの分離ぼかしを blurPasses 回。支持 ±2セル = ±60px = ボール半径。

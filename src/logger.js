@@ -28,7 +28,7 @@ function toCsv(rows) {
   return [head, ...body].join('\r\n');
 }
 
-function download(filename, text) {
+export function download(filename, text) {
   // BOM を付けないと Excel が UTF-8 と認識せず日本語ヘッダが化ける
   const blob = new Blob(['﻿' + text], { type: 'text/csv;charset=utf-8;' });
   const url  = URL.createObjectURL(blob);
@@ -91,16 +91,37 @@ export class Logger {
   get trialCount()      { return this.#trials.length; }
   get hasUnexported()   { return !this.#exported && this.#trials.length > 0; }
 
-  exportTrials() {
-    if (this.#trials.length === 0) return false;
-    download(`trials_${this.#session.participant_id || 'NA'}_${stamp()}.csv`, toCsv(this.#trials));
+  // CSV の生成とダウンロードを分離してある。オペレーション画面(別ウィンドウ)から
+  // 書き出すときは csv* でテキストだけ作って送り、向こう側でダウンロードする
+  // (被験者用モニターにダウンロード UI を出さないため)。
+  csvTrials() {
+    if (this.#trials.length === 0) return null;
     this.#exported = true;
+    return {
+      filename: `trials_${this.#session.participant_id || 'NA'}_${stamp()}.csv`,
+      text: toCsv(this.#trials),
+    };
+  }
+
+  csvEvents() {
+    if (this.#events.length === 0) return null;
+    return {
+      filename: `events_${this.#session.participant_id || 'NA'}_${stamp()}.csv`,
+      text: toCsv(this.#events),
+    };
+  }
+
+  exportTrials() {
+    const csv = this.csvTrials();
+    if (!csv) return false;
+    download(csv.filename, csv.text);
     return true;
   }
 
   exportEvents() {
-    if (this.#events.length === 0) return false;
-    download(`events_${this.#session.participant_id || 'NA'}_${stamp()}.csv`, toCsv(this.#events));
+    const csv = this.csvEvents();
+    if (!csv) return false;
+    download(csv.filename, csv.text);
     return true;
   }
 

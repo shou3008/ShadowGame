@@ -4,6 +4,13 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>影リフティング（重力の官能評価）</title>
+  <script>
+    // ?display=1 (オペレーション画面から開かれる表示専用ウィンドウ) では、
+    // CDN スクリプトやモデルの読み込み中にツールバーが一瞬でも見えないよう、
+    // 最初の描画より前に隠す。以降のオン/オフは src/ui.js が同じクラスで管理する。
+    if (new URLSearchParams(location.search).get('display') === '1')
+      document.documentElement.classList.add('display-mode');
+  </script>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -26,13 +33,16 @@
           <button id="btn-export-events" class="game-btn">CSV(イベント)</button>
         </div>
         <div class="tool-group">
+          <button id="btn-operator" class="game-btn">操作画面を開く</button>
+        </div>
+        <div class="tool-group">
           <label for="ctrl-camera">カメラ</label>
           <select id="ctrl-camera"><option>読み込み中...</option></select>
           <label for="ctrl-quality">品質</label>
           <select id="ctrl-quality">
             <option value="ultrafast">最速</option>
-            <option value="fast" selected>速度優先</option>
-            <option value="balanced">バランス</option>
+            <option value="fast">速度優先</option>
+            <option value="balanced" selected>バランス</option>
             <option value="accurate">精度優先</option>
           </select>
           <label class="check"><input type="checkbox" id="ctrl-flip" checked>左右反転</label>

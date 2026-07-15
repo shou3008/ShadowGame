@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>影リフティング — オペレーション画面</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body class="operator">
+  <main id="op-panel">
+    <h1>オペレーション画面</h1>
+    <div id="op-conn" class="op-conn op-conn-down">プレイ画面: 未接続</div>
+    <div class="op-row">
+      <button id="op-open-play" class="game-btn primary">プレイ画面を開く</button>
+      <span class="op-note-inline">開いたウィンドウを被験者用モニターへ移し、ダブルクリックで全画面化</span>
+    </div>
+
+    <section class="op-section">
+      <h2>セッション</h2>
+      <div class="op-row">
+        <label for="op-pid">参加者ID</label>
+        <input type="text" id="op-pid" size="8" placeholder="P01">
+      </div>
+      <div class="op-row">
+        <label for="op-gmode">重力モード</label>
+        <select id="op-gmode">
+          <option value="auto">自動(ランダム順・盲検)</option>
+        </select>
+      </div>
+      <p class="op-note">
+        手動を選ぶと任意の水準を1試行だけ実施します。盲検のランダム順は進まず、
+        記録には is_manual=1 が付きます(本試行の分析からは除外してください)。
+        倍率は被験者画面には表示されません。
+      </p>
+      <div class="op-row">
+        <button id="op-next" class="game-btn primary">開始</button>
+        <button id="op-abort" class="game-btn" disabled>中止</button>
+        <span id="op-progress">— / —</span>
+      </div>
+    </section>
+
+    <section class="op-section">
+      <h2>状態</h2>
+      <div class="op-row"><span class="op-key">ステータス</span><span id="op-status">—</span></div>
+      <div class="op-row"><span class="op-key">性能</span><span id="op-fps">—</span></div>
+      <div class="op-row"><span class="op-key">記録済み試行</span><span id="op-trials">0</span></div>
+    </section>
+
+    <section class="op-section">
+      <h2>設定 <small>(試行中はロックされます)</small></h2>
+      <div class="op-row">
+        <label for="op-camera">カメラ</label>
+        <select id="op-camera"></select>
+      </div>
+      <div class="op-row">
+        <label for="op-quality">品質</label>
+        <select id="op-quality">
+          <option value="ultrafast">最速</option>
+          <option value="fast">速度優先</option>
+          <option value="balanced">バランス</option>
+          <option value="accurate">精度優先</option>
+        </select>
+        <label class="check"><input type="checkbox" id="op-flip">左右反転</label>
+      </div>
+      <div class="op-row">
+        <label for="op-scale">解像度</label>
+        <input type="range" id="op-scale" min="10" max="100" step="5" value="100">
+        <span id="op-scale-val">--</span>
+      </div>
+      <div class="op-row">
+        <label for="op-cell">間隔</label>
+        <input type="range" id="op-cell" min="6" max="60" step="1" value="18">
+        <span id="op-cell-val">18px</span>
+      </div>
+      <div class="op-row">
+        <label for="op-fg">影</label>
+        <input type="color" id="op-fg" value="#000000">
+        <label for="op-bg">背景</label>
+        <input type="color" id="op-bg" value="#ffffff">
+      </div>
+    </section>
+
+    <section class="op-section">
+      <h2>CSV 書き出し <small>(この画面にダウンロードされます)</small></h2>
+      <div class="op-row">
+        <button id="op-export-trials" class="game-btn">CSV(試行)</button>
+        <button id="op-export-events" class="game-btn">CSV(イベント)</button>
+        <span id="op-unexported" hidden>⚠ 未書き出しの記録があります</span>
+      </div>
+    </section>
+
+    <p class="op-hint">
+      「プレイ画面を開く」で開いたウィンドウは操作UIの無い表示専用です(カメラ許可の
+      ダイアログだけはそのウィンドウに出ます)。全画面化はプレイ画面側をダブルクリック
+      してください(ブラウザの制約で、この画面からは操作できません)。
+    </p>
+  </main>
+
+  <script type="module" src="src/operator.js"></script>
+</body>
+</html>

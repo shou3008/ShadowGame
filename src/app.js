@@ -16,6 +16,7 @@ import { SilhouetteMask } from './mask.js';
 import { LiftingGame }    from './lifting-game.js';
 import { Session, physicsSnapshot } from './session.js';
 import { Logger }         from './logger.js';
+import { RemoteBridge }   from './remote.js';
 import { DEBUG_ON, drawDebug }      from './debug.js';
 import { SELFTEST_ON, runSelfTest } from './selftest.js';
 import * as ui            from './ui.js';
@@ -35,6 +36,12 @@ const saveCameraPref = (id) => {
 async function main() {
   const { els, config } = ui;
 
+  // ?display=1 = 表示専用モード(オペレーション画面から window.open で開かれた場合)。
+  // 被験者用モニターに置くウィンドウなので、起動直後から操作UIを一切見せない。
+  // オペレーション画面と接続できなければ後で ⚙ を復帰させる(下の接続タイムアウト)。
+  const displayMode = new URLSearchParams(location.search).get('display') === '1';
+  if (displayMode) ui.setOperatorMode(true);
+
   // --- カメラ ---
   ui.setStatus('カメラを起動中...');
   const camera = new Camera(els.video);
@@ -49,6 +56,7 @@ async function main() {
   const session  = new Session(game, logger);
 
   // --- レイアウト ---
+  let needsRender = true;   // リサイズ等で canvas がクリアされたら立てる
   function fitCanvas() {
     const aspect = WORLD_W / WORLD_H;
     const dispW  = Math.min(window.innerWidth, Math.round(window.innerHeight * aspect));
@@ -58,7 +66,8 @@ async function main() {
 
     const rw = Math.max(1, Math.round(dispW * config.pixelScale));
     const rh = Math.max(1, Math.round(dispH * config.pixelScale));
-    renderer.resize(rw, rh);
+    renderer.resize(rw, rh);   // canvas.width の変更で描画内容が消えるので再描画が要る
+    needsRender = true;
     ui.setRenderSize(rw, rh);
 
     els.gameCanvas.width  = dispW;
@@ -77,15 +86,20 @@ async function main() {
   let paused = false;
   let processing = false;
 
+  let cameraList = [];   // オペレーション画面のカメラ選択にも流す
   async function fillCameraSelect() {
     const cams = await camera.listCameras();
     const current = camera.deviceId;
+    cameraList = cams.map((cam, i) => ({
+      id: cam.deviceId,
+      label: cam.label || `カメラ ${i + 1}`,
+    }));
     els.camera.innerHTML = '';
-    cams.forEach((cam, i) => {
+    cameraList.forEach((cam) => {
       const opt = document.createElement('option');
-      opt.value = cam.deviceId;
-      opt.textContent = cam.label || `カメラ ${i + 1}`;
-      if (cam.deviceId === current) opt.selected = true;
+      opt.value = cam.id;
+      opt.textContent = cam.label;
+      if (cam.id === current) opt.selected = true;
       els.camera.appendChild(opt);
     });
   }
@@ -157,27 +171,42 @@ async function main() {
   if (SELFTEST_ON) runSelfTest();
 
   // --- セッション操作 ---
+  // ローカルのボタンとオペレーション画面の両方から同じ関数を呼ぶ(二重実装しない)。
+  //
+  // manualLevel: オペレーション画面で選ばれた重力モード。'auto' なら盲検ランダム順、
+  // 水準IDなら手動試行(is_manual=1 で記録、キューは進めない)。
+  // ★プレイ画面にはこの値を一切表示しない(盲検)。
+  let manualLevel = 'auto';
+
+  function handleNext() {
+    if (session.state === 'idle') {
+      const pid = (els.pid.value || '').trim();
+      if (!pid) { ui.setStatus('参加者IDを入力してください'); return; }
+      session.begin(pid, {
+        app_version: APP_VERSION,
+        tf_backend:  backend,
+        quality_preset: quality,
+        camera_w: camera.width,
+        camera_h: camera.height,
+        cell_size:   config.cellSize,
+        pixel_scale: config.pixelScale,
+        mirror: config.mirror ? 1 : 0,
+        ...physicsSnapshot(),
+      });
+    }
+    if (manualLevel !== 'auto') session.startManual(manualLevel);
+    else session.next();
+    ui.updateSessionUi(session);
+  }
+
+  function handleAbort() {
+    session.abort();
+    ui.updateSessionUi(session);
+  }
+
   ui.bindSession({
-    onNext: () => {
-      if (session.state === 'idle') {
-        const pid = (els.pid.value || '').trim();
-        if (!pid) { alert('参加者IDを入力してください'); return; }
-        session.begin(pid, {
-          app_version: APP_VERSION,
-          tf_backend:  backend,
-          quality_preset: quality,
-          camera_w: camera.width,
-          camera_h: camera.height,
-          cell_size:   config.cellSize,
-          pixel_scale: config.pixelScale,
-          mirror: config.mirror ? 1 : 0,
-          ...physicsSnapshot(),
-        });
-      }
-      session.next();
-      ui.updateSessionUi(session);
-    },
-    onAbort: () => { session.abort(); ui.updateSessionUi(session); },
+    onNext:  handleNext,
+    onAbort: handleAbort,
     onExportTrials: () => {
       if (!logger.exportTrials()) alert('まだ記録がありません');
     },
@@ -186,6 +215,76 @@ async function main() {
     },
   });
   ui.updateSessionUi(session);
+
+  // --- オペレーション画面(別ウィンドウ)との接続 ---
+  const remote = new RemoteBridge({
+    onNext:  handleNext,
+    onAbort: handleAbort,
+    applySet: (key, value) => {
+      // 試行中の設定変更は剰余変数になるため受け付けない(ローカルの lockControls と同じ方針)
+      if (session.running) return;
+      if (key === 'gmode') {
+        // 重力モードはオペレーション画面専用(プレイ画面に対応するコントロールは無い)
+        const valid = value === 'auto' || session.levelOptions.some(o => o.id === value);
+        if (valid) manualLevel = value;
+        return;
+      }
+      ui.applyRemoteSet(key, value);
+    },
+    getCsv: (which) => (which === 'trials' ? logger.csvTrials() : logger.csvEvents()),
+    // ★盲検: ここに重力に関する値を入れてはいけない
+    getState: () => ({
+      state:       session.state,
+      running:     session.running,
+      progress:    session.progress,
+      nextLabel:   session.nextLabel,
+      pid:         els.pid.value,
+      status:      els.status.textContent,
+      statusError: els.status.className === 'banner-error',
+      fps:         els.fps.textContent,
+      cameras:     cameraList,
+      cameraId:    camera.deviceId,
+      quality,
+      mirror:      config.mirror,
+      scale:       els.scale.value,
+      scaleVal:    els.scaleVal.textContent,
+      cell:        els.cell.value,
+      fg:          els.fg.value,
+      bg:          els.bg.value,
+      trialCount:  logger.trialCount,
+      hasUnexported: logger.hasUnexported,
+      gmode:        manualLevel,
+      gmodeOptions: session.levelOptions,   // 水準IDと倍率のみ(絶対値は載せない)
+      manual:       session.isManual,
+    }),
+    // 接続中は被験者用モニターから操作UIを完全に消す。切断で ⚙ が復帰。
+    // 切断時は重力モードを自動(盲検順)へ戻す — プレイ画面単独の操作で
+    // 手動モードのまま気づかず試行を始めてしまう事故を防ぐ。
+    onConnectChange: (connected) => {
+      ui.setOperatorMode(connected);
+      if (!connected) manualLevel = 'auto';
+    },
+  });
+
+  els.operator.addEventListener('click', () => {
+    window.open('operator.html', 'shadowgame-operator', 'width=620,height=840');
+  });
+
+  // 表示専用モードで開いたのにオペレーション画面が現れない場合の脱出口。
+  // (通常はオペ側が先に開いていて 1 秒以内に接続されるため、これは発火しない)
+  if (displayMode) {
+    setTimeout(() => {
+      if (!remote.connected) ui.setOperatorMode(false);
+    }, 8000);
+  }
+
+  // 被験者用モニターでの全画面化。requestFullscreen はそのウィンドウ内の
+  // ユーザー操作でしか発火できないため、リモートではなくダブルクリックに割り当てる。
+  window.addEventListener('dblclick', (e) => {
+    if (e.target instanceof Element && e.target.closest('#ui')) return;
+    if (document.fullscreenElement) document.exitFullscreen();
+    else document.documentElement.requestFullscreen();
+  });
 
   window.addEventListener('beforeunload', (e) => {
     if (logger.hasUnexported) { e.preventDefault(); e.returnValue = ''; }
@@ -201,6 +300,8 @@ async function main() {
   }
 
   // --- メインループ ---
+  let renderedMaskVer   = -1;
+  let renderedConfigVer = -1;
   let lastFrame   = performance.now();
   let lastFpsTime = performance.now();
   let frameCount  = 0;
@@ -217,7 +318,15 @@ async function main() {
     session.update(dtMs);      // game.update より先。カウントダウン終了で startPlay する
     game.update(dtMs);
 
-    renderer.render(mask.canvas, { camW: camera.width, camH: camera.height, ...config });
+    // シルエットはマスクか外観設定が変わったときだけ描き直す。
+    // マスクは推論レート(~10-20fps)でしか変わらないので、毎 rAF の再描画は
+    // 丸ごと無駄で、同じ GPU を使う TFJS 推論を遅くしていた。
+    if (needsRender || mask.version !== renderedMaskVer || config.version !== renderedConfigVer) {
+      renderer.render(mask.alpha, mask.width, mask.height, config);
+      renderedMaskVer   = mask.version;
+      renderedConfigVer = config.version;
+      needsRender = false;
+    }
 
     game.draw();
     const ctx = els.gameCanvas.getContext('2d');
@@ -251,7 +360,8 @@ async function main() {
           inferMsSum += inferMs;
           maskMsSum  += tApplied - tInferred;
           inferCount++;
-          session.noteInference(inferMs, lastCoverage);
+          const f = game.field;
+          session.noteInference(inferMs, lastCoverage, f.centroidX, f.centroidY, f.motion);
         })
         .catch(err => { console.error('BodyPix error:', err); })
         .finally(() => { processing = false; });
@@ -270,6 +380,9 @@ async function main() {
 }
 
 main().catch(err => {
+  // 表示専用モードで起動に失敗すると、UI ごと隠れたままエラーが見えなくなる。
+  // 致命的エラー時はモードを解除してステータスを見えるようにする。
+  ui.setOperatorMode(false);
   ui.setStatus('エラー: ' + err.message);
   console.error(err);
 });

@@ -19,6 +19,8 @@ export const els = {
   exportTrials: $('btn-export-trials'),
   exportEvents: $('btn-export-events'),
 
+  operator: $('btn-operator'),
+
   camera:   $('ctrl-camera'),
   quality:  $('ctrl-quality'),
   flip:     $('ctrl-flip'),
@@ -39,27 +41,47 @@ function hexToVec4(hex) {
   ]);
 }
 
-// Renderer にそのまま渡す描画設定
+// Renderer にそのまま渡す描画設定。
+// version は外観が変わるたびに進む。描画側はこれを見て「変わったときだけ」再描画する。
 export const config = {
   fgColor:    hexToVec4(els.fg.value),
   bgColor:    hexToVec4(els.bg.value),
   pixelScale: parseInt(els.scale.value) / 100,
   mirror:     els.flip.checked,
   cellSize:   parseInt(els.cell.value),
+  version:    0,
 };
 
 export function bindAppearanceControls(onScaleChange) {
-  els.fg.addEventListener('input',    () => { config.fgColor = hexToVec4(els.fg.value); });
-  els.bg.addEventListener('input',    () => { config.bgColor = hexToVec4(els.bg.value); });
-  els.flip.addEventListener('change', () => { config.mirror  = els.flip.checked; });
+  els.fg.addEventListener('input',    () => { config.fgColor = hexToVec4(els.fg.value); config.version++; });
+  els.bg.addEventListener('input',    () => { config.bgColor = hexToVec4(els.bg.value); config.version++; });
+  els.flip.addEventListener('change', () => { config.mirror  = els.flip.checked;        config.version++; });
   els.cell.addEventListener('input',  () => {
     config.cellSize = parseInt(els.cell.value);
     els.cellVal.textContent = els.cell.value + 'px';
+    config.version++;
   });
   els.scale.addEventListener('input', () => {
     config.pixelScale = parseInt(els.scale.value) / 100;
+    config.version++;
     onScaleChange();
   });
+}
+
+// オペレーション画面からの設定変更。既存の DOM コントロールに値を入れて
+// 合成イベントを発火することで、ローカル操作とまったく同じコード経路を通す。
+export function applyRemoteSet(key, value) {
+  const fire = (el, type) => el.dispatchEvent(new Event(type));
+  switch (key) {
+    case 'pid':     els.pid.value = String(value); break;
+    case 'camera':  els.camera.value  = String(value); fire(els.camera,  'change'); break;
+    case 'quality': els.quality.value = String(value); fire(els.quality, 'change'); break;
+    case 'mirror':  els.flip.checked  = !!value;        fire(els.flip,   'change'); break;
+    case 'scale':   els.scale.value   = String(value);  fire(els.scale,  'input');  break;
+    case 'cell':    els.cell.value    = String(value);  fire(els.cell,   'input');  break;
+    case 'fg':      els.fg.value      = String(value);  fire(els.fg,     'input');  break;
+    case 'bg':      els.bg.value      = String(value);  fire(els.bg,     'input');  break;
+  }
 }
 
 export function bindSession({ onNext, onAbort, onExportTrials, onExportEvents }) {
@@ -79,10 +101,28 @@ export function lockControls(locked) {
   els.next.disabled  = locked;
 }
 
-// 試行中はツールバーを隠す(被験者の視界から実験者用UIを外す)
+// 試行中はツールバーを隠す(被験者の視界から実験者用UIを外す)。
+// オペレーション画面接続中は ⚙ も含めて完全に非表示にする(被験者用モニターを
+// 影とゲームだけにする)。切断されたら ⚙ が復帰し、ローカル操作に戻れる。
+let toolbarVisible = true;
+let operatorMode   = false;
+
+function applyUiVisibility() {
+  els.toolbar.hidden = operatorMode || !toolbarVisible;
+  els.uiShow.hidden  = operatorMode || toolbarVisible;
+  // ?display=1 のとき index.html の冒頭スクリプトが同じクラスを先に付けている
+  // (CDN 読み込み中のチラ見え防止)。ここで状態と同期させ、切断時に外す。
+  document.documentElement.classList.toggle('display-mode', operatorMode);
+}
+
 export function setToolbarVisible(visible) {
-  els.toolbar.hidden = !visible;
-  els.uiShow.hidden  = visible;
+  toolbarVisible = visible;
+  applyUiVisibility();
+}
+
+export function setOperatorMode(on) {
+  operatorMode = on;
+  applyUiVisibility();
 }
 
 export function updateSessionUi(session) {

@@ -104,6 +104,14 @@ export const FIELD = {
   blurPasses: 2,
 };
 
+// ===== マスクのモルフォロジー・オープニング (収縮→膨張) =====
+// BodyPix は低解像度スコアを補間拡大してから二値化するため、2つのシルエットが
+// 近づくと間の領域がメタボール状に繋がる。オープニングは幅 2r px 以下の「橋」を
+// 切断する一方、体本体の輪郭は収縮後に膨張で復元されるので太さは変わらない。
+// 副作用として (2r+1)px 未満の孤立ノイズ斑点も消える。
+// カメラ解像度 640x360 基準。0 にすると無効。
+export const MASK_OPEN_RADIUS = 2;
+
 // ===== マスクの時間平滑化 (対称 EMA) =====
 // 非対称にすると「進む影」と「退く影」で dO/dt に方向バイアスが乗り、
 // 跳ね返りが左右非対称になる。実験装置なので対称にする。
@@ -143,12 +151,18 @@ export const QUALITY_PRESETS = {
   },
 };
 
-export const DEFAULT_QUALITY = 'fast';
+// パイロットの官能評価で「動きが最も良い」と判断されたのが balanced。
+// 実質の既定値は index.html の <option selected> 側。ここはフォールバック。
+export const DEFAULT_QUALITY = 'balanced';
 
 // internalResolution は品質プリセット側から与えるので、ここには持たせない。
 export const INFERENCE_CONFIG = {
   flipHorizontal:        false,
-  // 下げるほど影が太り、白い服なども欠けにくくなる。背景ノイズは FIELD のぼかしと
-  // shadowThresh がある程度吸収する。
-  segmentationThreshold: 0.3,
+  // BodyPix は低解像度スコアマップをバイリニア補間で拡大してから この値で二値化する。
+  // 閾値が低いと、近接した2つのシルエットの間でスコアの裾同士が繋がったまま閾値を
+  // 超え、互いに引き延ばされて結合する(メタボール現象)。0.6 はその橋を切るための値。
+  //   下げる: 影が太り白い服などが欠けにくくなるが、シルエット同士が繋がりやすくなる
+  //   上げる: 橋は切れるが、低コントラスト部位(白い服・髪など)に穴があきやすくなる
+  // 穴が目立つ場合は 0.5 まで下げ、橋の切断は MASK_OPEN_RADIUS に任せること。
+  segmentationThreshold: 0.6,
 };

@@ -91,6 +91,12 @@ body {
   z-index: 10;
 }
 
+/* 表示専用モード(オペレーション画面接続中 / ?display=1 の起動直後)。
+   操作UIをコンテナごと消す。クラスの付け外しは index.html 冒頭と src/ui.js。 */
+.display-mode #ui {
+  display: none;
+}
+
 #toolbar {
   display: flex;
   flex-wrap: wrap;
@@ -194,4 +200,118 @@ input[type="color"] {
   padding: 0;
   cursor: pointer;
   background: none;
+}
+
+/* ===== オペレーション画面 (operator.html) ===== */
+
+body.operator {
+  overflow: auto;
+  padding: 20px;
+}
+
+#op-panel {
+  max-width: 560px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+#op-panel h1 {
+  font-size: 18px;
+  font-weight: 700;
+}
+
+#op-panel h2 {
+  font-size: 13px;
+  font-weight: 700;
+  color: #9ab;
+  margin-bottom: 8px;
+}
+
+#op-panel h2 small {
+  font-weight: 400;
+  color: #667;
+}
+
+.op-section {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 12px 14px;
+}
+
+.op-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.op-key {
+  color: #889;
+  min-width: 92px;
+}
+
+.op-conn {
+  font-size: 13px;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: 6px;
+}
+.op-conn-up   { background: rgba(90, 240, 138, 0.15); color: #5af08a; }
+.op-conn-down { background: rgba(231, 76, 60, 0.2);   color: #ff8a7a; }
+
+#op-pid {
+  background: #1c1c1c;
+  border: 1px solid #444;
+  color: #eee;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+
+.op-note {
+  font-size: 11px;
+  color: #778;
+  line-height: 1.5;
+  padding: 2px 0 6px;
+}
+
+.op-note-inline {
+  font-size: 11px;
+  color: #778;
+}
+
+#op-camera, #op-quality, #op-gmode {
+  background: rgba(255, 255, 255, 0.1);
+  color: #eee;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 5px;
+  padding: 3px 6px;
+  font-size: 13px;
+  max-width: 260px;
+}
+
+#op-progress {
+  color: #5af08a;
+  font-variant-numeric: tabular-nums;
+}
+
+#op-unexported {
+  color: #ffb347;
+  font-size: 12px;
+}
+
+.op-hint {
+  font-size: 12px;
+  color: #778;
+  line-height: 1.6;
+}
+
+#op-panel input:disabled,
+#op-panel select:disabled,
+#op-panel .game-btn:disabled {
+  opacity: 0.35;
 }

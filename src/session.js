@@ -7,7 +7,14 @@ import {
 // ★盲検の担保: 重力値は #queue と game.setGravity() と logger の中だけに存在し、
 //   このクラスは画面に出す値を一切公開しない。gravity の getter を作ってはいけない。
 //
+//   例外: levelOptions は水準 ID と基準比の倍率(×0.33 等)だけを公開する。
+//   これはオペレーション画面(実験者用モニター)の手動モードのためで、実験者の求めに
+//   応じたもの。絶対値 (px/s²) は出さない。被験者画面には決して表示されない。
+//
 //   idle ─begin(pid)→ ready ─next()→ countdown → running → ended ─next()→ … → done
+//
+//   手動試行 (startManual): 盲検キューを進めずに任意の水準を 1 試行だけ実施する。
+//   CSV には is_manual=1 が付き、本試行 (is_manual=0) と区別して除外/分析できる。
 
 // 参加者IDから再現可能な乱数列を作る(同じIDなら同じ提示順になる)
 function hash32(str) {
@@ -44,6 +51,8 @@ export class Session {
   #queue = [];
   #pos   = -1;
   #seed  = 0;
+  #manual = null;          // 実施中の手動試行(盲検キューの外)
+  #manualCount = 0;
 
   #countdownMs = 0;
   #elapsedMs   = 0;        // 実プレイ時間(再投入待ちを除く)
@@ -54,6 +63,12 @@ export class Session {
   // 推論レートの試行内統計(遅延が独立変数と交絡していないかの事後検証用)
   #inferSamples = [];
   #coverageSum = 0; #coverageCount = 0; #framesNoPerson = 0;
+  #coverageSum2 = 0;
+
+  // 体動量(主観評価との対応づけ用)。重心の移動距離と、マスク変化率の平均。
+  #moveSum = 0; #moveMs = 0;
+  #lastCx = NaN; #lastCy = NaN; #lastNoteAt = 0;
+  #motionSum = 0; #motionCount = 0;
 
   constructor(game, logger) {
     this.#game   = game;
@@ -78,8 +93,19 @@ export class Session {
   }
   get canStart() { return this.#state === 'ready' || this.#state === 'ended'; }
   get running()  { return this.#state === 'countdown' || this.#state === 'running'; }
+  get isManual() { return !!this.#manual; }
 
-  get #current() { return this.#pos >= 0 ? this.#queue[this.#pos] : null; }
+  // オペレーション画面の手動モード用の選択肢。倍率のみ(冒頭のコメント参照)。
+  get levelOptions() {
+    return GRAVITY_LEVELS.map(l => ({
+      id: l.id,
+      label: `${l.id} (×${(l.gravity / BASELINE_GRAVITY).toFixed(2)})`,
+    }));
+  }
+
+  get #current() {
+    return this.#manual ?? (this.#pos >= 0 ? this.#queue[this.#pos] : null);
+  }
 
   // ---- セッション開始 ----
   begin(participantId, meta) {
@@ -108,14 +134,34 @@ export class Session {
     this.#state = 'ready';
   }
 
-  // ---- 次の試行へ ----
+  // ---- 次の試行へ(盲検ランダム順) ----
   next() {
     if (!this.canStart) return;
     if (this.#pos + 1 >= this.#queue.length) { this.#state = 'done'; return; }
-
     this.#pos++;
-    const t = this.#current;
+    this.#startTrial(this.#queue[this.#pos]);
+  }
 
+  // ---- 手動試行(盲検キューの外で任意の水準を1試行だけ実施) ----
+  // キューは進めない。done 後でも追加実施できる。CSV には is_manual=1 が付く。
+  startManual(levelId) {
+    const ok = this.#state === 'ready' || this.#state === 'ended' || this.#state === 'done';
+    if (!ok) return;
+    const lv = GRAVITY_LEVELS.find(l => l.id === levelId);
+    if (!lv) return;
+    this.#manualCount++;
+    this.#manual = {
+      is_practice: 0,
+      is_manual:   1,
+      block:       '',
+      level:       lv,
+      trial_index: `manual-${this.#manualCount}`,
+      presentation_order: '',
+    };
+    this.#startTrial(this.#manual);
+  }
+
+  #startTrial(t) {
     this.#game.reset();
     this.#game.setGravity(t.level.gravity);      // ★重力が外へ出る唯一の経路(その1)
 
@@ -127,11 +173,16 @@ export class Session {
 
     this.#inferSamples = [];
     this.#coverageSum = 0; this.#coverageCount = 0; this.#framesNoPerson = 0;
+    this.#coverageSum2 = 0;
+    this.#moveSum = 0; this.#moveMs = 0;
+    this.#lastCx = NaN; this.#lastCy = NaN; this.#lastNoteAt = 0;
+    this.#motionSum = 0; this.#motionCount = 0;
 
     const ratio = t.level.gravity / BASELINE_GRAVITY;
     this.#logger.beginTrial({           // ★重力が外へ出る唯一の経路(その2)
       trial_index:        t.trial_index,
       is_practice:        t.is_practice,
+      is_manual:          t.is_manual ? 1 : 0,
       block:              t.block,
       presentation_order: t.presentation_order,
       level_id:           t.level.id,
@@ -150,19 +201,41 @@ export class Session {
     if (!this.running) return;
     this.#game.stopPlay();
     this.#logger.abortTrial();
-    // 中止した水準は最後にもう一度出す(黙って消さない)
-    const t = this.#current;
-    this.#queue.push({ ...t, trial_index: this.#queue.length, presentation_order: this.#queue.length });
+    if (this.#manual) {
+      this.#manual = null;    // 手動試行は再キューしない
+    } else {
+      // 中止した水準は最後にもう一度出す(黙って消さない)
+      const t = this.#current;
+      this.#queue.push({ ...t, trial_index: this.#queue.length, presentation_order: this.#queue.length });
+    }
     this.#state = 'ended';
   }
 
-  // 推論のたびに app.js から呼ばれる。試行内の推論レートと在席を記録する。
-  noteInference(inferMs, coverage) {
-    if (this.#state !== 'running') return;
+  // 推論のたびに app.js から呼ばれる。試行内の推論レートと在席、体動量を記録する。
+  // cx/cy は占有率の重心(world px。人がいなければ NaN)、motion は平均 |∂O/∂t|。
+  noteInference(inferMs, coverage, cx = NaN, cy = NaN, motion = NaN) {
+    if (this.#state !== 'running') {
+      this.#lastCx = NaN; this.#lastCy = NaN;
+      return;
+    }
     this.#inferSamples.push(inferMs);
-    this.#coverageSum += coverage;
+    this.#coverageSum  += coverage;
+    this.#coverageSum2 += coverage * coverage;
     this.#coverageCount++;
     if (coverage < 0.01) this.#framesNoPerson++;
+
+    if (Number.isFinite(motion)) { this.#motionSum += motion; this.#motionCount++; }
+
+    const now = performance.now();
+    if (Number.isFinite(cx) && Number.isFinite(this.#lastCx)) {
+      const dt = now - this.#lastNoteAt;
+      // 推論間隔として妥当な範囲のみ加算(タブ切替等の長い中断で距離が飛ぶのを防ぐ)
+      if (dt > 0 && dt < 500) {
+        this.#moveSum += Math.hypot(cx - this.#lastCx, cy - this.#lastCy);
+        this.#moveMs  += dt;
+      }
+    }
+    this.#lastCx = cx; this.#lastCy = cy; this.#lastNoteAt = now;
   }
 
   // ---- 毎フレーム。game.update より先に呼ぶこと ----
@@ -196,6 +269,13 @@ export class Session {
     const maxMs  = fps ? Math.max(...this.#inferSamples) : 0;
     const secs   = this.#elapsedMs / 1000 || 1;
 
+    // カバレッジの標準偏差(立ち位置・姿勢の変動)
+    let coverageSd = '';
+    if (this.#coverageCount > 1) {
+      const m = this.#coverageSum / this.#coverageCount;
+      coverageSd = Math.sqrt(Math.max(0, this.#coverageSum2 / this.#coverageCount - m * m)).toFixed(4);
+    }
+
     this.#logger.endTrial(this.#game.stats, {
       trial_active_ms: Math.round(this.#elapsedMs),
       trial_wall_ms:   Math.round(this.#wallMs),
@@ -206,10 +286,17 @@ export class Session {
       infer_ms_max:    maxMs.toFixed(1),
       mean_body_coverage: this.#coverageCount
         ? (this.#coverageSum / this.#coverageCount).toFixed(4) : '',
+      coverage_sd: coverageSd,
       frames_no_person: this.#framesNoPerson,
+      // 体動量: 重心移動は「体ごと動いた量」、mask_motion は手足を含む「動きの激しさ」
+      body_move_px_s: this.#moveMs > 0
+        ? (this.#moveSum / (this.#moveMs / 1000)).toFixed(1) : '',
+      mask_motion_mean: this.#motionCount
+        ? (this.#motionSum / this.#motionCount).toFixed(4) : '',
       ended_at: new Date().toISOString(),
     });
 
+    this.#manual = null;
     this.#state = this.#pos + 1 >= this.#queue.length ? 'done' : 'ended';
   }
 
@@ -257,7 +344,10 @@ export class Session {
     text(`連続 ${this.#game.rally}`, 40, 30);
     text(`最高 ${this.#game.rallyMax}`, 40, 84);
     text(`ミス ${this.#game.drops}`, 40, 138);
-    text(this.isPractice ? '練習' : `試行 ${this.progress}`, WORLD_W / 2, 30, 'center');
+    text(
+      this.isPractice ? '練習' : this.isManual ? '手動試行' : `試行 ${this.progress}`,
+      WORLD_W / 2, 30, 'center',
+    );
 
     const left = Math.max(0, this.#durationMs - this.#elapsedMs) / 1000;
     ctx.font = 'bold 56px sans-serif';
