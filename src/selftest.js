@@ -1,6 +1,8 @@
 import { LiftingGame } from './lifting-game.js';
+import { SilhouetteMask } from './mask.js';
 import {
   WORLD_W, WORLD_H, BALL_R, FLOOR_Y, FIELD, PHYSICS, GRAVITY_LEVELS,
+  SUBJECT_ONLY,
 } from './settings.js';
 
 // ?selftest=1 で実行。Node が無いので、これが唯一の自動検証。
@@ -256,6 +258,59 @@ function testSweepDoesNotDiverge() {
     : fail('8. 影の掃引でエネルギーが発散しない', `E増加 ${growth.toFixed(2)}倍 / 最高速 ${peak.toFixed(0)} / clamp=${clamps} ← posCorrect を下げる`);
 }
 
+// 9. 被験者選択: オープニングで千切れた腕が復元され、映り込んだ別人は消える。
+//    腕はこの装置の入力デバイスそのもの。腕が欠けると全条件の操作性が壊れ、
+//    別人の影が残ると被験者以外がボールに触れる(どちらも従属変数を汚染する)。
+function testSubjectMask() {
+  if (!SUBJECT_ONLY) {
+    fail('9. 被験者選択と腕の復元', 'SUBJECT_ONLY=false — 実験では有効にすること');
+    return;
+  }
+  const W = 160, H = 90;
+  const seg = (draw) => {
+    const data = new Uint8Array(W * H);
+    const rect = (x0, y0, x1, y1) => {
+      for (let y = y0; y <= y1; y++)
+        for (let x = x0; x <= x1; x++) data[y * W + x] = 1;
+    };
+    draw(rect);
+    return { width: W, height: H, data };
+  };
+  // 体 + 幅3px の腕 + 手。幅3px はオープニング(r=2 → 幅5px未満を削除)で必ず千切れる
+  const subject = (rect) => {
+    rect(30, 20, 55, 80);   // 体
+    rect(56, 30, 80, 32);   // 腕
+    rect(81, 26, 88, 36);   // 手
+  };
+  const at = (m, x, y) => m.smooth[y * W + x];
+
+  const m = new SilhouetteMask();
+  m.reset(W, H);
+  m.update(seg(subject));                  // 1: 被験者のみ → 追跡確立
+  const armAlone = at(m, 70, 31);
+
+  m.update(seg((rect) => {                 // 2: 被験者より大きい別人がメタボール橋で繋がる
+    subject(rect);
+    rect(100, 10, 150, 85);                // 別人
+    rect(89, 30, 99, 32);                  // 橋 (幅3px)
+  }));
+  const arm      = at(m, 70, 31);
+  const hand     = at(m, 84, 31);
+  const body     = at(m, 40, 50);
+  const intruder = at(m, 125, 45);
+
+  m.update(seg(subject));                  // 3: 別人が退出
+  const after = at(m, 40, 50);
+
+  const good = armAlone > 0.5 && arm > 0.5 && hand > 0.5 && body > 0.5 &&
+               intruder < 0.1 && after > 0.9;
+  const detail =
+    `腕=${arm.toFixed(2)} 手=${hand.toFixed(2)} 体=${body.toFixed(2)} ` +
+    `別人=${intruder.toFixed(2)} 退出後=${after.toFixed(2)}`;
+  good ? ok('9. 被験者選択と腕の復元', detail)
+       : fail('9. 被験者選択と腕の復元', detail + ' ← 腕>0.5 / 別人<0.1 が期待値');
+}
+
 // ---------------------------------------------------------------------------
 
 export function runSelfTest() {
@@ -272,6 +327,7 @@ export function runSelfTest() {
     testApexGravityIndependent();
     testReflectionAngle();
     testSweepDoesNotDiverge();
+    testSubjectMask();
   } catch (err) {
     fail('例外', String(err && err.stack || err));
   } finally {
